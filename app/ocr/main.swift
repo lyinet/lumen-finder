@@ -19,7 +19,7 @@ func recognize(_ image: CGImage) -> String {
     req.usesLanguageCorrection = true
     var langs = ["zh-Hans", "zh-Hant", "en-US"]
     if #available(macOS 13.0, *) { langs += ["ja-JP", "ko-KR"] }
-    if let supported = try? req.supportedRecognitionLanguages() {
+    if #available(macOS 12.0, *), let supported = try? req.supportedRecognitionLanguages() {
         langs = langs.filter { supported.contains($0) }
     }
     if !langs.isEmpty { req.recognitionLanguages = langs }
