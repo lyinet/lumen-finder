@@ -23,10 +23,10 @@
 - [x] ⌥Space summon, keyboard-first, Quick Look, reveal
 - [x] Insights, duplicates, forgotten files
 - [ ] Notarized universal DMG + Sparkle-style auto-update (tauri-plugin-updater)
-- [~] Menu-bar extra (v0.2: icon + menu); compact search panel still to do
+- [x] Menu-bar extra (v0.2) and Spotlight-style quick panel (v0.3)
 - [x] External drives: index offline volumes, show "on drive X (not connected)" (v0.2)
 - [x] Move duplicates to Trash (Put Back from Trash), clean-up-all (v0.2)
-- [~] Settings: hotkey rebinding (v0.2); launch at login, light/dark/auto to do
+- [x] Settings: hotkey rebinding (v0.2); launch at login, light/dark/auto (v0.3)
 - [x] Onboarding asks for Full Disk Access with a one-click deep link (v0.2)
 - [ ] English + 简体中文 + 繁體中文 copy review
 

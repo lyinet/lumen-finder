@@ -247,34 +247,11 @@ struct Where {
     args: Vec<Value>,
 }
 
-/// Files whose text contains each two-character CJK word, found once per
-/// search and reused by the result, count and facet queries. A substring scan
-/// is linear in the stored text, so it stops after a few thousand hits:
-/// common words fill that quickly, and a list that long gets refined by
-/// typing more anyway.
-fn short_content_hits(conn: &rusqlite::Connection, p: &Parsed) -> Result<std::collections::HashMap<String, String>> {
-    let mut out = std::collections::HashMap::new();
-    let mut stmt = conn.prepare_cached("SELECT id FROM content WHERE instr(body, ?1) > 0 LIMIT 3000")?;
-    for t in &p.terms {
-        if t.is_ascii() || t.chars().count() != 2 || out.contains_key(t) {
-            continue;
-        }
-        let ids: Vec<String> = stmt
-            .query_map([t], |r| r.get::<_, i64>(0))?
-            .filter_map(|r| r.ok())
-            .map(|i| i.to_string())
-            .collect();
-        out.insert(t.clone(), if ids.is_empty() { "-1".into() } else { ids.join(",") });
-    }
-    Ok(out)
-}
-
 fn build_where(
     p: &Parsed,
     extra_kinds: &[Kind],
     with_kinds: bool,
     content: bool,
-    short: &std::collections::HashMap<String, String>,
 ) -> Where {
     let mut w = Where { sql: Vec::new(), args: Vec::new() };
     let terms = p.terms.iter().map(|t| (t, content)).chain(p.name_terms.iter().map(|t| (t, false)));
@@ -293,14 +270,9 @@ fn build_where(
             w.args.push(Value::Text(pat));
         }
         if content {
-            if long {
+            if let Some(expr) = crate::cjk::match_expr(t) {
                 ors.push("f.id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)".into());
-                w.args.push(Value::Text(fts_quote(t)));
-            } else if let Some(ids) = short.get(t) {
-                // Two Chinese characters: ids from one substring scan (integer
-                // literals only). One or two Latin letters would match nearly
-                // every document, so those stay name-only.
-                ors.push(format!("f.id IN ({ids})"));
+                w.args.push(Value::Text(expr));
             }
         }
         w.sql.push(format!("({})", ors.join(" OR ")));
@@ -352,8 +324,7 @@ impl Index {
         let conn = self.conn();
 
         let content = !req.names_only;
-        let short = if content { short_content_hits(&conn, &p)? } else { Default::default() };
-        let w = build_where(&p, &req.kinds, true, content, &short);
+        let w = build_where(&p, &req.kinds, true, content);
         let where_sql = if w.sql.is_empty() { "1".to_string() } else { w.sql.join(" AND ") };
 
         // Relevance: exact name > name starts with > name contains > pinyin
@@ -407,7 +378,7 @@ impl Index {
             |r| r.get(0),
         )?;
 
-        let wk = build_where(&p, &[], false, content, &short);
+        let wk = build_where(&p, &[], false, content);
         let wk_sql = if wk.sql.is_empty() { "1".to_string() } else { wk.sql.join(" AND ") };
         let mut kind_counts = BTreeMap::new();
         let mut stmt = conn.prepare(&format!(

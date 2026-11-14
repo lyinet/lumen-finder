@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -67,18 +67,15 @@ CREATE TABLE IF NOT EXISTS content (
     size  INTEGER NOT NULL,
     body  TEXT NOT NULL DEFAULT ''
 );
+-- v3: the index holds the text split by cjk::index_text (CJK runs as
+-- overlapping two-character pieces), written from Rust; the stored body above
+-- is only for snippets.
 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
-    body, content='content', content_rowid='id', tokenize='trigram'
+    toks, content='', contentless_delete=1,
+    tokenize='unicode61 remove_diacritics 2'
 );
-CREATE TRIGGER IF NOT EXISTS content_ai AFTER INSERT ON content BEGIN
-    INSERT INTO content_fts(rowid, body) VALUES (new.id, new.body);
-END;
-CREATE TRIGGER IF NOT EXISTS content_ad AFTER DELETE ON content BEGIN
-    INSERT INTO content_fts(content_fts, rowid, body) VALUES ('delete', old.id, old.body);
-END;
-CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE OF body ON content BEGIN
-    INSERT INTO content_fts(content_fts, rowid, body) VALUES ('delete', old.id, old.body);
-    INSERT INTO content_fts(rowid, body) VALUES (new.id, new.body);
+CREATE TRIGGER IF NOT EXISTS content_ad3 AFTER DELETE ON content BEGIN
+    DELETE FROM content_fts WHERE rowid = old.id;
 END;
 CREATE TRIGGER IF NOT EXISTS files_ad_content AFTER DELETE ON files BEGIN
     DELETE FROM content WHERE id = old.id;
@@ -217,7 +214,16 @@ impl Index {
         let conn = open_conn(&path)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         // v1 → v2 only added tables, which SCHEMA creates below.
-        if version != 0 && version != SCHEMA_VERSION && version != 1 {
+        if version == 2 {
+            // v2 kept a trigram index of document text. Drop it and forget the
+            // text so the next pass re-reads documents into the v3 index.
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS content_ai; DROP TRIGGER IF EXISTS content_ad;
+                 DROP TRIGGER IF EXISTS content_au; DROP TABLE IF EXISTS content_fts;
+                 DELETE FROM content;",
+            )?;
+        }
+        if version != 0 && version != SCHEMA_VERSION && version != 1 && version != 2 {
             // Future migrations go here. The index is a cache of the disk, so
             // the safe fallback is always "drop and rescan".
             conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;

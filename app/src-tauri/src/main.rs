@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct AppState {
@@ -234,7 +235,14 @@ fn set_options(
     state: State<AppState>,
     content_search: Option<bool>,
     include_external: Option<bool>,
+    quick_panel: Option<bool>,
+    launch_at_login: Option<bool>,
+    theme: Option<String>,
 ) -> Res<Config> {
+    if let Some(on) = launch_at_login {
+        let al = app.autolaunch();
+        if on { al.enable() } else { al.disable() }.map_err(err)?;
+    }
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
         if let Some(v) = content_search {
@@ -243,11 +251,104 @@ fn set_options(
         if let Some(v) = include_external {
             cfg.include_external = v;
         }
+        if let Some(v) = quick_panel {
+            cfg.quick_panel = v;
+        }
+        if let Some(v) = launch_at_login {
+            cfg.launch_at_login = v;
+        }
+        if let Some(v) = &theme {
+            cfg.theme = v.clone();
+        }
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    if theme.is_some() {
+        apply_theme(&app, &cfg.theme);
+    }
+    // Only the options that change what is indexed need a scan.
+    if content_search.is_some() || include_external.is_some() {
+        run_scan(&app, &state)?;
+    }
     Ok(cfg)
+}
+
+fn apply_theme(app: &AppHandle, theme: &str) {
+    let t = match theme {
+        "light" => Some(Theme::Light),
+        "dark" => Some(Theme::Dark),
+        _ => None,
+    };
+    for w in app.webview_windows().values() {
+        let _ = w.set_theme(t);
+    }
+    let _ = app.emit("app://theme", theme);
+}
+
+// ------------------------------------------------------------ quick panel --
+
+const QUICK_WIDTH: f64 = 680.0;
+
+/// The shortcut and the menu bar icon: the quick panel, or the main window
+/// when the user turned the panel off.
+fn summon(app: &AppHandle) {
+    let quick = app.state::<AppState>().config.lock().unwrap().quick_panel;
+    if quick {
+        toggle_quick(app)
+    } else {
+        toggle_main(app)
+    }
+}
+
+fn toggle_quick(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("quick") else { return toggle_main(app) };
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.hide();
+        return;
+    }
+    // Centered, a fifth of the way down the screen the cursor is on, like Spotlight.
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| w.current_monitor().ok().flatten());
+    if let Some(m) = monitor {
+        let scale = m.scale_factor();
+        let (mp, ms) = (m.position(), m.size());
+        let x = mp.x + ((ms.width as f64 - QUICK_WIDTH * scale) / 2.0) as i32;
+        let y = mp.y + (ms.height as f64 * 0.2) as i32;
+        let _ = w.set_position(PhysicalPosition::new(x, y));
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+    let _ = w.emit("quick://show", ());
+}
+
+/// The panel's page measures itself after every render.
+#[tauri::command]
+fn quick_resize(app: AppHandle, height: f64) {
+    if let Some(w) = app.get_webview_window("quick") {
+        let _ = w.set_size(LogicalSize::new(QUICK_WIDTH, height.clamp(62.0, 640.0)));
+    }
+}
+
+#[tauri::command]
+fn quick_hide(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("quick") {
+        let _ = w.hide();
+    }
+}
+
+/// "See all in Lumen": hand the query to the main window.
+#[tauri::command]
+fn show_in_main(app: AppHandle, query: String) {
+    quick_hide(app.clone());
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        let _ = w.emit("app://query", query);
+    }
 }
 
 /// Change the summon shortcut. The old one stays if the new one is taken.
@@ -378,9 +479,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         || sys_locale_is_zh();
     let t = |zh_s: &'static str, en: &'static str| if zh { zh_s } else { en };
     let show = MenuItem::with_id(app, "show", t("打开 Lumen", "Open Lumen"), true, None::<&str>)?;
+    let quick = MenuItem::with_id(app, "quick", t("快速搜索…", "Quick Search…"), true, None::<&str>)?;
     let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "Rescan Now"), true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
-    let menu = Menu::with_items(app, &[&show, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(app, &[&quick, &show, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("lumen")
         .icon(icon)
@@ -390,6 +492,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
             "show" => toggle_main(app),
+            "quick" => toggle_quick(app),
             "rescan" => {
                 let state = app.state::<AppState>();
                 let _ = run_scan(app, &state);
@@ -399,7 +502,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .on_tray_icon_event(|tray, ev| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                toggle_main(tray.app_handle());
+                summon(tray.app_handle());
             }
         })
         .build(app)?;
@@ -417,12 +520,13 @@ fn sys_locale_is_zh() -> bool {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
                     // Lumen registers exactly one shortcut: the summon key.
                     if event.state() == ShortcutState::Pressed {
-                        toggle_main(app);
+                        summon(app);
                     }
                 })
                 .build(),
@@ -455,6 +559,14 @@ fn main() {
                 }
                 Err(_) => log::warn!("invalid hotkey in config: {hotkey}"),
             }
+            let theme = app.state::<AppState>().config.lock().unwrap().theme.clone();
+            apply_theme(app.handle(), &theme);
+            // Started at login: stay in the menu bar until summoned.
+            if std::env::args().any(|a| a == "--hidden") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
             if let Err(e) = build_tray(app) {
                 log::warn!("menu bar icon unavailable: {e}");
             }
@@ -471,11 +583,16 @@ fn main() {
         })
         .on_window_event(|window, event| {
             // Closing the window keeps Lumen one keystroke away (⌥Space).
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+            match event {
+                WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                     api.prevent_close();
                     let _ = window.hide();
                 }
+                // The quick panel goes away the moment you click elsewhere.
+                WindowEvent::Focused(false) if window.label() == "quick" => {
+                    let _ = window.hide();
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -494,6 +611,9 @@ fn main() {
             set_hotkey,
             trash_paths,
             open_fda_settings,
+            quick_resize,
+            quick_hide,
+            show_in_main,
             open_path,
             reveal,
             quick_look

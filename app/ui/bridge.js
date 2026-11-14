@@ -28,6 +28,9 @@ function realBridge() {
     setOptions: opts => invoke('set_options', opts),
     setHotkey: hotkey => invoke('set_hotkey', { hotkey }),
     openFdaSettings: () => invoke('open_fda_settings'),
+    quickResize: height => invoke('quick_resize', { height }),
+    quickHide: () => invoke('quick_hide'),
+    showInMain: query => invoke('show_in_main', { query }),
     pickFolder: async () => tauri.dialog ? tauri.dialog.open({ directory: true, multiple: false }) : null,
     on: (event, cb) => listen(event, e => cb(e.payload)),
   }
@@ -87,7 +90,7 @@ function mockBridge() {
   }
   let scanned = !location.hash.includes('first')
   const listeners = {}
-  const opts = { content_search: true, include_external: true, hotkey: 'Alt+Space' }
+  const opts = { content_search: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto' }
   const emit = (e, p) => (listeners[e] || []).forEach(cb => cb(p))
   const ALIAS = { 文档: 'document', 音乐: 'audio', 视频: 'video', 图片: 'image', 照片: 'image', music: 'audio', doc: 'document', photo: 'image' }
 
@@ -165,7 +168,12 @@ function mockBridge() {
     },
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
-    setOptions: async o => { if (o.contentSearch !== undefined) opts.content_search = o.contentSearch; if (o.includeExternal !== undefined) opts.include_external = o.includeExternal; return opts },
+    setOptions: async o => {
+      const map = { contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme' }
+      for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
+      return opts
+    },
+    quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},
     setRoots: async roots => ({ roots }),

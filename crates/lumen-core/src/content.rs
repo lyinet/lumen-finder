@@ -179,13 +179,20 @@ fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool)]) -> Result
             "INSERT INTO content (id, mtime, size, body) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, body = excluded.body",
         )?;
+        let mut fts_del = tx.prepare_cached("DELETE FROM content_fts WHERE rowid = ?1")?;
+        let mut fts_ins = tx.prepare_cached("INSERT INTO content_fts(rowid, toks) VALUES (?1, ?2)")?;
         for (job, text, _) in items {
             // The file may have left the index while it was being read.
             let exists: bool = tx
                 .query_row("SELECT 1 FROM files WHERE id = ?1", [job.id], |_| Ok(true))
                 .unwrap_or(false);
             if exists {
-                stmt.execute(params![job.id, job.mtime, job.size, text.as_deref().unwrap_or("")])?;
+                let body = text.as_deref().unwrap_or("");
+                stmt.execute(params![job.id, job.mtime, job.size, body])?;
+                fts_del.execute([job.id])?;
+                if !body.is_empty() {
+                    fts_ins.execute(params![job.id, crate::cjk::index_text(body)])?;
+                }
             }
         }
     }

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0 — 2026-11-15
+
+- **Quick panel**: the summon shortcut (and the menu bar icon) opens a Spotlight-style search box centered on the screen with the cursor. ↵ open · ⌘↵ reveal · ⌘Y Quick Look · ⌘C copy path · ⌘O / Tab show all in the main window · Esc or clicking away hides it. Empty query shows recent files. Can be turned off in Settings to summon the main window instead.
+- **CJK text index rewritten** (schema v3): document text is indexed as overlapping two-character pieces in a contentless FTS5 table. Two-character Chinese searches 71 → 7.8 ms, index 163 → 98 MB, first read 11.2 → 8.5 s on the 4,000-document benchmark. v2 indexes re-read their documents once after upgrading.
+- **Open at login** (LaunchAgent, starts hidden in the menu bar).
+- **Appearance**: follow the system, or pin light or dark; applies to both windows and the native vibrancy.
+- Changing appearance or panel options no longer triggers a rescan.
+
 ## v0.2.0 — 2026-11-15
 
 **正文搜索 / Full-text search**

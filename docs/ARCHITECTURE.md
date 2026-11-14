@@ -76,17 +76,20 @@ watcher.
 ## Full-text search (v0.2)
 
 - `content(id, mtime, size, body)` holds up to 120k characters per readable
-  document, keyed by the file's id; `content_fts` is an external-content FTS5
-  trigram index over `body`. Triggers keep both in step, and deleting a row from
-  `files` deletes its text.
+  document, keyed by the file's id, for snippets. `content_fts` (v3) is a
+  contentless FTS5 `unicode61` index over the same text rewritten by
+  `cjk::index_text`: every CJK run becomes its overlapping two-character
+  pieces, so 北海道雪景 is indexed as 北海 海道 道雪 雪景. Rows are written from
+  Rust next to `content`; deleting a file deletes both.
 - `index_content` selects files whose extension is readable and whose
   size/mtime differ from the stored text, extracts on up to 6 worker threads
   (PDF parsing is CPU-bound) and writes in batches of 64 on one connection. A
   panicking PDF parser is caught per file.
-- Query: each word is `(name/pinyin/folder match) OR (content match)`. Words of
-  3+ characters use the trigram index; 2-character CJK words fall back to
-  `instr(body, ?)`; 1–2 Latin letters stay name-only (they would match nearly
-  every document). Name hits rank above text-only hits. Snippets are cut in
+- Query: each word is `(name/pinyin/folder match) OR (content match)`. The
+  content side is `cjk::match_expr`: CJK becomes a phrase of adjacent pieces
+  (违约金 → "违约 约金"), a trailing Latin word or lone CJK character is a
+  prefix (report → reports). A single CJK character or 1–2 Latin letters stay
+  name-only (they would match nearly every document). Name hits rank above text-only hits. Snippets are cut in
   Rust around the first matching word for hits whose name does not explain the
   match.
 - Extraction is pure Rust: zip + markup stripping for Office/OpenDocument/EPUB,
@@ -108,12 +111,14 @@ triggers a rescan.
 | | |
 |---|---|
 | name scan | 0.13 s |
-| reading all document text (first time) | 11.2 s, then only changed files |
-| `违约金` (3+ chars, trigram FTS) | 5.8 ms, 2,553 hits |
-| `合同` (2 chars, substring scan once per search) | 71 ms |
-| `北海道雪景` | 0.9 ms |
-| index size | 163 MB (CJK trigrams are dense) |
+| | v0.2 trigram | v0.3 bigram |
+|---|---|---|
+| reading all document text (first time) | 11.2 s | 8.5 s |
+| `违约金` | 5.8 ms | 7.0 ms |
+| `合同` (two characters) | 71 ms | 7.8 ms |
+| `北海道雪景` | 0.9 ms | 0.8 ms |
+| index size | 163 MB | 98 MB |
 
-Two-character Chinese words are the slow path and grow linearly with stored
-text; a bigram side table (or FTS5 `unicode61` over pre-split CJK bigrams) is
-the planned fix. Index size is the other cost to watch on large libraries.
+The bigram index trades true substring matching inside Latin words (`venue`
+no longer finds `revenue`) for word/prefix matching, which is what people
+type anyway.

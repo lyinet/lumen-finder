@@ -7,6 +7,7 @@
 //! Shortcuts).
 
 pub mod config;
+pub mod cjk;
 pub mod content;
 pub mod index;
 pub mod insights;

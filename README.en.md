@@ -25,6 +25,17 @@
 
 <br>
 
+## ✦ New in v0.3: a Spotlight-style quick panel
+
+<p align="center">
+  <img src="docs/screenshots/quick.jpg" alt="Quick panel" width="72%">
+</p>
+
+- **Quick panel** — `⌥ Space` pops a search box mid-screen: `↵` opens, `⌘↵` reveals, `⌘Y` Quick Look, `⌘O` hands the results to the main window. Click away to dismiss.
+- **Faster, smaller text index** — CJK text is indexed as two-character pieces: two-character Chinese words went from 71 ms to **8 ms**, the index is **40% smaller**.
+- **Open at login** — quietly in the menu bar.
+- **Light, dark or follow the system.**
+
 ## ✦ New in v0.2: search what your files say
 
 <p align="center">
@@ -140,7 +151,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - [x] Move duplicates to Trash <sub>v0.2</sub>
 - [x] **Content search** for PDF / Word / Markdown / PowerPoint / Excel / EPUB <sub>v0.2</sub>
 - [ ] Image and scanned-PDF **OCR** (on-device Apple Vision)
-- [ ] Compact menu-bar search panel · launch at login · light theme
+- [x] Quick panel · open at login · light theme · faster CJK text index <sub>v0.3</sub>
+- [ ] In-app auto-update · Homebrew
 - [ ] Smart collections: invoices, contracts, ID photos, screenshots
 - [ ] On-device semantic search
 

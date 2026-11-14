@@ -25,6 +25,24 @@
 
 <br>
 
+## ✦ v0.3 新增：像 Spotlight 一样随手一搜
+
+<p align="center">
+  <img src="docs/screenshots/quick.jpg" alt="快速搜索小窗" width="72%">
+</p>
+
+- **快速搜索小窗** — 按 `⌥ Space`，屏幕中间弹出搜索框；`↵` 打开，`⌘↵` 在访达中显示，`⌘Y` 快速查看，`⌘O` 把全部结果交给主窗口。点别处自动收起。
+- **正文索引重写** — 中文按二字切分建索引：「合同」这类两字词从 71 ms 降到 **8 ms**，索引体积缩小 **40%**，首次读取快 25%。
+- **开机启动** — 登录后安静待在菜单栏，不弹窗。
+- **浅色 / 深色 / 跟随系统** — 可在设置里固定外观。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/quick-light.jpg" alt="浅色小窗"><p align="center"><sub><b>浅色外观</b> · 小窗</sub></p></td>
+<td width="50%"><img src="docs/screenshots/light.jpg" alt="浅色主窗口"><p align="center"><sub><b>浅色外观</b> · 主窗口</sub></p></td>
+</tr>
+</table>
+
 ## ✦ v0.2 新增：搜文件里写了什么
 
 <p align="center">
@@ -178,7 +196,8 @@ crates/lumen-cli    命令行
 - [x] 重复文件一键移到废纸篓 <sub>v0.2</sub>
 - [x] **正文搜索** PDF / Word / Markdown / PPT / Excel / EPUB <sub>v0.2</sub>
 - [ ] 图片与扫描件 **OCR**（本地 Apple Vision）
-- [ ] 菜单栏紧凑搜索小窗 · 开机自启 · 浅色主题
+- [x] 快速搜索小窗 · 开机自启 · 浅色主题 · 二字词正文索引 <sub>v0.3</sub>
+- [ ] 应用内自动更新 · Homebrew
 - [ ] 智能合集：发票、合同、证件照、截图
 - [ ] 本地语义搜索："北海道的雪景视频"
 

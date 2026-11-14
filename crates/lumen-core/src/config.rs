@@ -23,6 +23,12 @@ pub struct Config {
     pub include_external: bool,
     /// The summon shortcut, in Tauri's accelerator syntax.
     pub hotkey: String,
+    /// The shortcut opens the compact quick panel (true) or the main window.
+    pub quick_panel: bool,
+    /// Start Lumen (hidden, in the menu bar) when the user logs in.
+    pub launch_at_login: bool,
+    /// "auto" follows macOS, or "light" / "dark".
+    pub theme: String,
 }
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -168,6 +174,9 @@ impl Default for Config {
             content_search: true,
             include_external: true,
             hotkey: DEFAULT_HOTKEY.to_string(),
+            quick_panel: true,
+            launch_at_login: false,
+            theme: "auto".to_string(),
         }
     }
 }
