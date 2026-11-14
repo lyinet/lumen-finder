@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lumen</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Living backdrop: three slow aurora blobs behind the glass -->
+  <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div id="app" class="app">
+    <aside class="sidebar glass" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <div class="brand-mark"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/><path class="spark" d="M10.5 7.2l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></div>
+        <span>Lumen</span>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot">
+        <div class="live" id="live">
+          <span class="live-dot"></span>
+          <div class="live-text"><b id="live-count">—</b><small id="live-sub"></small></div>
+        </div>
+        <button class="rescan" id="rescan" title=""><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="drag" data-tauri-drag-region></div>
+      <section class="view" id="view"></section>
+    </main>
+  </div>
+
+  <!-- First run & scanning take the whole window -->
+  <section class="stage" id="stage" hidden></section>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

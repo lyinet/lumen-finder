@@ -1,0 +1,22 @@
+[package]
+name = "lumen-core"
+description = "Lumen engine: scan, index, search and watch personal files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+ignore.workspace = true
+notify.workspace = true
+crossbeam-channel.workspace = true
+blake3.workspace = true
+pinyin.workspace = true
+dirs.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

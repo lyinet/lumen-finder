@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/lumen-core", "crates/lumen-cli"]
+# The Tauri shell links macOS/WebKit system frameworks; it builds on its own
+# (`cd app/src-tauri && cargo tauri build`) so the engine stays testable anywhere.
+exclude = ["app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ignore = "0.4"
+notify = "6"
+crossbeam-channel = "0.5"
+blake3 = "1"
+pinyin = "0.10"
+dirs = "5"
+log = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
