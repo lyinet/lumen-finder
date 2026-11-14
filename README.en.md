@@ -97,7 +97,7 @@ xcode-select --install
 curl https://sh.rustup.rs -sSf | sh
 cargo install tauri-cli --version "^2" --locked
 
-git clone <this repo> && cd lumen/app/src-tauri
+git clone https://github.com/lyinet/lumen-finder.git && cd lumen-finder/app/src-tauri
 cargo tauri dev                                       # run
 cargo tauri build --target universal-apple-darwin     # .dmg for Apple Silicon + Intel
 ```
