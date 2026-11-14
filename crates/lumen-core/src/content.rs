@@ -33,8 +33,55 @@ pub const EXTS: &[&str] = &[
     "pptx", "xlsx", "odt", "odp", "ods", "epub", "pdf",
 ];
 
+/// Images Lumen reads with OCR when a helper is set (see `set_ocr_helper`).
+pub const OCR_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "webp", "bmp"];
+/// Images smaller than this are icons and thumbnails, larger are rarely text.
+const OCR_MIN_BYTES: i64 = 20 * 1024;
+const OCR_MAX_BYTES: i64 = 40 * 1024 * 1024;
+/// A PDF with fewer characters than this in its text layer is a scan.
+const SCANNED_PDF_CHARS: usize = 40;
+
 pub fn supported(ext: &str) -> bool {
     EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
+
+static OCR_HELPER: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Point Lumen at the `lumen-ocr` helper (macOS Vision) to read text in images
+/// and scanned PDFs, or pass None to turn OCR off.
+pub fn set_ocr_helper(path: Option<std::path::PathBuf>) {
+    *OCR_HELPER.write().unwrap() = path.filter(|p| p.exists());
+}
+
+fn ocr_helper() -> Option<std::path::PathBuf> {
+    OCR_HELPER.read().unwrap().clone()
+}
+
+/// Run the helper with a time limit; a stuck file never stalls the queue.
+fn ocr(path: &Path) -> Result<String> {
+    use std::process::{Command, Stdio};
+    let Some(bin) = ocr_helper() else { return Ok(String::new()) };
+    let mut child = Command::new(bin).arg(path).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let buf = reader.join().unwrap_or_default();
+            anyhow::ensure!(status.success(), "ocr failed");
+            return Ok(String::from_utf8_lossy(&buf).into_owned());
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("ocr timed out");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,14 +125,33 @@ pub(crate) fn index_pending(
     mut on_progress: impl FnMut(&ContentProgress),
 ) -> Result<ContentReport> {
     let started = Instant::now();
+    if ocr_helper().is_some() {
+        // First run with OCR: scans read before had an empty text layer;
+        // forget those so they go through the helper.
+        let done: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = 'ocr_v1'", [], |r| r.get(0)).ok();
+        if done.is_none() {
+            conn.execute_batch(
+                "DELETE FROM content WHERE length(body) < 40 AND id IN (SELECT id FROM files WHERE ext = 'pdf');
+                 INSERT OR REPLACE INTO meta(key, value) VALUES ('ocr_v1', '1');",
+            )?;
+        }
+    }
     let marks = EXTS.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(",");
+    let ocr_marks = OCR_EXTS.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(",");
+    // Images join the queue only with OCR on, after the documents (they are slower).
+    let images = if ocr_helper().is_some() {
+        format!("OR (f.ext IN ({ocr_marks}) AND f.size BETWEEN {OCR_MIN_BYTES} AND {OCR_MAX_BYTES})")
+    } else {
+        String::new()
+    };
     let jobs: Vec<Job> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT f.id, f.path, f.ext, f.size, f.mtime FROM files f
              LEFT JOIN content c ON c.id = f.id
-             WHERE f.ext IN ({marks}) AND f.size <= ?1
+             WHERE ((f.ext IN ({marks}) AND f.size <= ?1) {images})
                AND (c.id IS NULL OR c.mtime <> f.mtime OR c.size <> f.size)
-             ORDER BY f.mtime DESC"
+             ORDER BY f.ext IN ({ocr_marks}), f.mtime DESC"
         ))?;
         let rows = stmt.query_map([MAX_FILE_BYTES], |r| {
             Ok(Job { id: r.get(0)?, path: r.get(1)?, ext: r.get(2)?, size: r.get(3)?, mtime: r.get(4)? })
@@ -217,7 +283,15 @@ pub fn extract(path: &Path, ext: &str) -> Result<Option<String>> {
             let n = n.to_ascii_lowercase();
             (n.ends_with(".xhtml") || n.ends_with(".html") || n.ends_with(".htm")) && !n.contains("toc")
         })?,
-        "pdf" => pdf_text(path)?,
+        "pdf" => {
+            let t = pdf_text(path).unwrap_or_default();
+            if t.trim().chars().count() < SCANNED_PDF_CHARS && ocr_helper().is_some() {
+                ocr(path)?
+            } else {
+                t
+            }
+        }
+        e if OCR_EXTS.contains(&e) => ocr(path)?,
         _ => return Ok(None),
     };
     let text = normalize(&raw);

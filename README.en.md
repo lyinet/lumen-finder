@@ -25,6 +25,12 @@
 
 <br>
 
+## ✦ New in v0.4: smart collections + text in images
+
+- **Smart collections** — invoices & receipts, contracts, IDs, screenshots and résumés gather themselves from wherever they live.
+- **OCR** — macOS Vision reads photos, screenshots and scanned PDFs (Chinese, English, Japanese, Korean) on device, so a photographed receipt is searchable by what it says.
+- **Traditional Chinese UI** for zh-TW / zh-HK / zh-MO.
+
 ## ✦ New in v0.3: a Spotlight-style quick panel
 
 <p align="center">

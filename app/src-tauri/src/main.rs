@@ -7,7 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use lumen_core::{
-    index_content, scan, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Overview,
+    index_content, scan, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Overview,
     SearchRequest, SearchResponse, Watcher,
 };
 use serde::Serialize;
@@ -228,6 +228,23 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
     Ok(cfg)
 }
 
+/// Smart collections and how many files each holds.
+#[tauri::command]
+fn collections(state: State<AppState>) -> Res<Vec<CollectionStat>> {
+    state.index.collections().map_err(err)
+}
+
+#[tauri::command]
+fn collection(state: State<AppState>, id: String, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
+    state.index.collection(&id, limit.unwrap_or(200), offset.unwrap_or(0)).map_err(err)
+}
+
+/// The Vision OCR helper ships next to the app binary (Contents/MacOS).
+fn use_ocr(on: bool) {
+    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("lumen-ocr")));
+    set_ocr_helper(if on { helper } else { None });
+}
+
 /// Content search and external drives on or off.
 #[tauri::command]
 fn set_options(
@@ -235,6 +252,7 @@ fn set_options(
     state: State<AppState>,
     content_search: Option<bool>,
     include_external: Option<bool>,
+    ocr: Option<bool>,
     quick_panel: Option<bool>,
     launch_at_login: Option<bool>,
     theme: Option<String>,
@@ -250,6 +268,10 @@ fn set_options(
         }
         if let Some(v) = include_external {
             cfg.include_external = v;
+        }
+        if let Some(v) = ocr {
+            cfg.ocr = v;
+            use_ocr(v);
         }
         if let Some(v) = quick_panel {
             cfg.quick_panel = v;
@@ -267,7 +289,7 @@ fn set_options(
         apply_theme(&app, &cfg.theme);
     }
     // Only the options that change what is indexed need a scan.
-    if content_search.is_some() || include_external.is_some() {
+    if content_search.is_some() || include_external.is_some() || ocr.is_some() {
         run_scan(&app, &state)?;
     }
     Ok(cfg)
@@ -536,6 +558,7 @@ fn main() {
             std::fs::create_dir_all(&data)?;
             let config_path = data.join("config.json");
             let config = Config::load(&config_path);
+            use_ocr(config.ocr);
             let index = Arc::new(Index::open(data.join("index.db"))?);
             let had_index = index.status().map(|s| s.generation > 0).unwrap_or(false);
 
@@ -612,6 +635,8 @@ fn main() {
             trash_paths,
             open_fda_settings,
             quick_resize,
+            collections,
+            collection,
             quick_hide,
             show_in_main,
             open_path,

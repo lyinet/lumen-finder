@@ -28,6 +28,8 @@ function realBridge() {
     setOptions: opts => invoke('set_options', opts),
     setHotkey: hotkey => invoke('set_hotkey', { hotkey }),
     openFdaSettings: () => invoke('open_fda_settings'),
+    collections: () => invoke('collections'),
+    collection: (id, limit) => invoke('collection', { id, limit }),
     quickResize: height => invoke('quick_resize', { height }),
     quickHide: () => invoke('quick_hide'),
     showInMain: query => invoke('show_in_main', { query }),
@@ -47,11 +49,11 @@ function mockBridge() {
     document: ['2024年终总结', '产品需求文档 v3', '读书笔记', '周报-第46周', '面试准备清单', 'Meeting notes Q3', '旅行计划-京都', '论文初稿', 'README', '租房合同扫描说明'],
     spreadsheet: ['家庭预算2025', '报价单-客户A', '销售数据汇总', 'Invoice tracker', '健身记录', '年度KPI'],
     presentation: ['融资路演', '季度复盘', 'Product launch deck', '毕业答辩', '品牌提案'],
-    pdf: ['劳动合同', '护照扫描件', '发票-11月', 'Tax return 2024', '体检报告', '房屋租赁合同', 'Boarding pass', '保险单'],
+    pdf: ['劳动合同', '个人简历-2026', 'invoice-apple-store', '服务协议-签字版', '护照扫描件', '发票-11月', 'Tax return 2024', '体检报告', '房屋租赁合同', 'Boarding pass', '保险单'],
     ebook: ['三体', '人类简史', 'Atomic Habits', '原则', '置身事内'],
     audio: ['晴天 - 周杰伦', 'Clair de Lune', '播客录音-第12期', '会议录音 1104', 'Blinding Lights', '夜曲'],
     video: ['婚礼花絮', '北海道旅行 4K', '宝宝第一次走路', 'Keynote 录屏', '毕业典礼', 'drone-shot-coast'],
-    image: ['IMG_2041', '全家福', '证件照-白底', 'Screenshot 2026-10-03', '樱花', 'logo-final-final'],
+    image: ['IMG_2041', '全家福', '证件照-白底', 'Screenshot 2026-10-03', '樱花', 'logo-final-final', 'Screenshot 2026-11-12', '截屏2026-09-30', '收据-咖啡'],
     archive: ['项目备份', 'photos-2019', '素材包', 'installer'],
     design: ['海报-终版', 'App UI v2', '名片设计', 'Brand kit'],
   }
@@ -90,7 +92,8 @@ function mockBridge() {
   }
   let scanned = !location.hash.includes('first')
   const listeners = {}
-  const opts = { content_search: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto' }
+  const COLS = [['invoices', /发票|invoice|收据/i], ['contracts', /合同|协议|contract/i], ['ids', /证件|护照|passport|身份证/i], ['screenshots', /^(Screenshot|截屏)/], ['resumes', /简历|resume/i]]
+  const opts = { content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto' }
   const emit = (e, p) => (listeners[e] || []).forEach(cb => cb(p))
   const ALIAS = { 文档: 'document', 音乐: 'audio', 视频: 'video', 图片: 'image', 照片: 'image', music: 'audio', doc: 'document', photo: 'image' }
 
@@ -169,10 +172,12 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
+    collections: async () => COLS.map(([id, re]) => { const m = files.filter(f => re.test(f.name)); return { id, files: m.length, bytes: m.reduce((a, f) => a + f.size, 0), latest: Math.max(0, ...m.map(f => f.mtime)) } }),
+    collection: async id => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime) },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},

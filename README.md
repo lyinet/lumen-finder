@@ -25,6 +25,16 @@
 
 <br>
 
+## ✦ v0.4 新增：智能合集 + 图片文字识别
+
+<p align="center">
+  <img src="docs/screenshots/collections.jpg" alt="智能合集" width="80%">
+</p>
+
+- **智能合集** — 发票与收据、合同与协议、证件、截图、简历，不管散在哪个文件夹，自动归拢到一处，新文件自动加入。
+- **识别图片里的文字（OCR）** — 用 macOS 自带的 Vision 读取照片、截图和扫描版 PDF（简繁中、英、日、韩），拍下的发票、身份证扫描件也能按文字搜到。全程在本机。
+- **繁體中文介面** — 系統語言為繁體中文（台灣、香港、澳門）時自動切換。
+
 ## ✦ v0.3 新增：像 Spotlight 一样随手一搜
 
 <p align="center">
@@ -195,10 +205,10 @@ crates/lumen-cli    命令行
 - [x] 外置硬盘离线索引（"Passport · 未连接"）<sub>v0.2</sub>
 - [x] 重复文件一键移到废纸篓 <sub>v0.2</sub>
 - [x] **正文搜索** PDF / Word / Markdown / PPT / Excel / EPUB <sub>v0.2</sub>
-- [ ] 图片与扫描件 **OCR**（本地 Apple Vision）
+- [x] 图片与扫描件 **OCR**（本地 Apple Vision） <sub>v0.4</sub>
 - [x] 快速搜索小窗 · 开机自启 · 浅色主题 · 二字词正文索引 <sub>v0.3</sub>
 - [ ] 应用内自动更新 · Homebrew
-- [ ] 智能合集：发票、合同、证件照、截图
+- [x] 智能合集：发票、合同、证件、截图、简历 <sub>v0.4</sub>
 - [ ] 本地语义搜索："北海道的雪景视频"
 
 完整计划见 [docs/PRODUCT.md](docs/PRODUCT.md)。

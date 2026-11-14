@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0 — 2026-11-15
+
+- **Smart collections** (new sidebar page, ⌘3): invoices & receipts, contracts, IDs, screenshots, résumés. Each is a rule over the file name and the words inside documents, PDFs and images; counts, size and last change per collection, and a full list on click.
+- **OCR**: a small Swift helper (`lumen-ocr`, Apple Vision + PDFKit, bundled as a sidecar) reads text in JPEG/PNG/HEIC/TIFF/WebP images (20 KB–40 MB) and in PDFs whose text layer is empty, up to 30 pages. Simplified/Traditional Chinese, English, plus Japanese and Korean on macOS 13+. Images are read after documents, newest first, 60 s limit per file. Settings → Search powers → Read text in images. Snippets from images are labelled "In image".
+- Scanned PDFs read by v0.3 (empty text) are re-read once through OCR.
+- **繁體中文** UI, chosen automatically for zh-TW / zh-HK / zh-MO / zh-Hant.
+- CI builds the helper for arm64 + x86_64 and smoke-tests it on a screenshot before packaging.
+
 ## v0.3.0 — 2026-11-15
 
 - **Quick panel**: the summon shortcut (and the menu bar icon) opens a Spotlight-style search box centered on the screen with the cursor. ↵ open · ⌘↵ reveal · ⌘Y Quick Look · ⌘C copy path · ⌘O / Tab show all in the main window · Esc or clicking away hides it. Empty query shows recent files. Can be turned off in Settings to summon the main window instead.

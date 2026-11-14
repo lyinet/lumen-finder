@@ -4,6 +4,9 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// The OCR helper is process-wide; tests that read content take turns.
+static CONTENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn touch(p: &Path, bytes: &[u8]) {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(p, bytes).unwrap();
@@ -143,6 +146,7 @@ fn pdf(p: &Path, text: &str) {
 
 #[test]
 fn content_search() {
+    let _turn = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     touch(&home.join("Notes/随手记.md"), "# 周末\n去京都看红叶，顺便买抹茶。".as_bytes());
@@ -200,4 +204,50 @@ fn volume_paths() {
     assert_eq!(config::volume_root(Path::new("/Users/a/x")), None);
     assert!(config::volume_offline(Path::new("/Volumes/__lumen_not_mounted__/a.mp4")));
     assert!(!config::volume_offline(Path::new("/Users/a/x")));
+}
+
+#[cfg(unix)]
+#[test]
+fn ocr_and_collections() {
+    let _turn = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let big = |tag: &str| { let mut v = tag.as_bytes().to_vec(); v.resize(30 * 1024, b' '); v };
+    touch(&home.join("Pictures/IMG_0412.jpg"), &big("RECEIPT"));
+    touch(&home.join("Pictures/IMG_0413.heic"), &big("IDCARD"));
+    touch(&home.join("Pictures/beach.jpg"), &big("NOTHING"));
+    touch(&home.join("Desktop/Screenshot 2026-11-01 at 10.02.11.png"), &big("NOTHING"));
+    touch(&home.join("Pictures/tiny-icon.png"), b"RECEIPT");
+    docx(&home.join("Work/服务协议.docx"), "甲方与乙方经友好协商。");
+    docx(&home.join("Work/notes.docx"), "本合同自签字之日起生效。");
+    docx(&home.join("Work/plain.docx"), "nothing to see");
+    // A stand-in for lumen-ocr: the "image" starts with a tag naming its text.
+    let helper = dir.path().join("fake-ocr");
+    touch(&helper, b"#!/bin/sh\ncase \"$(head -c 7 \"$1\")\" in\n  RECEIPT) echo '\xe5\x8f\x91\xe7\xa5\xa8\xe4\xbb\xa3\xe7\xa0\x81 044031900111 \xe4\xbb\xb7\xe7\xa8\x8e\xe5\x90\x88\xe8\xae\xa1 \xc2\xa5128.00';;\n  IDCARD*) echo '\xe5\xb1\x85\xe6\xb0\x91\xe8\xba\xab\xe4\xbb\xbd\xe8\xaf\x81 \xe5\x85\xac\xe6\xb0\x91\xe8\xba\xab\xe4\xbb\xbd\xe5\x8f\xb7\xe7\xa0\x81';;\n  *) ;;\nesac\n");
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    set_ocr_helper(Some(helper));
+    let r = index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    set_ocr_helper(None);
+    assert_eq!(r.read, 7, "3 docx + 4 images over the size floor");
+
+    assert_eq!(q(&index, "价税合计"), vec!["IMG_0412.jpg"]);
+    assert_eq!(q(&index, "居民身份证"), vec!["IMG_0413.heic"]);
+
+    let names = |id: &str| {
+        let mut v: Vec<String> = index.collection(id, 50, 0).unwrap().into_iter().map(|f| f.name).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names("invoices"), vec!["IMG_0412.jpg"]);
+    assert_eq!(names("ids"), vec!["IMG_0413.heic"]);
+    assert_eq!(names("contracts"), vec!["notes.docx", "服务协议.docx"]);
+    assert_eq!(names("screenshots"), vec!["Screenshot 2026-11-01 at 10.02.11.png"]);
+    let stats = index.collections().unwrap();
+    assert_eq!(stats.iter().find(|s| s.id == "contracts").unwrap().files, 2);
+    assert_eq!(stats.iter().find(|s| s.id == "resumes").unwrap().files, 0);
 }

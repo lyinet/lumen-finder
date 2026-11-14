@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod cjk;
+pub mod collections;
 pub mod content;
 pub mod index;
 pub mod insights;
@@ -17,7 +18,8 @@ pub mod search;
 pub mod watcher;
 
 pub use config::Config;
-pub use content::{index_content, ContentProgress, ContentReport};
+pub use collections::CollectionStat;
+pub use content::{index_content, set_ocr_helper, ContentProgress, ContentReport};
 pub use index::{FileRecord, Index, IndexStatus};
 pub use insights::{DuplicateGroup, KindStat, Overview};
 pub use kind::Kind;

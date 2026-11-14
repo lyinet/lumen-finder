@@ -28,11 +28,12 @@
 - [x] Move duplicates to Trash (Put Back from Trash), clean-up-all (v0.2)
 - [x] Settings: hotkey rebinding (v0.2); launch at login, light/dark/auto (v0.3)
 - [x] Onboarding asks for Full Disk Access with a one-click deep link (v0.2)
-- [ ] English + 简体中文 + 繁體中文 copy review
+- [~] English + 简体中文 + 繁體中文 (v0.4, machine-converted Traditional; needs a native review)
 
 ## Roadmap after launch
 - **正文搜索已在 v0.2 免费提供**（文字层：PDF/Word/Markdown/PPT/Excel/EPUB）。决策理由：这是对比 Spotlight/Finder 最直观的卖点，放进免费版拉新；Pro 改为承载更重的能力。
 - **v1.1 OCR (Pro)**：图片、截图、扫描版 PDF 的文字识别（Apple Vision 本地）。"我记得截图里写了'违约金'"。
+- **v0.4 状态**：OCR 与智能合集已上线，测试期间不设付费门槛；是否划入 Pro 在 1.0 前定。
 - **v1.2 智能视图**：自动整理"发票""合同""证件照""截图"等智能合集；时间线视图（"去年 11 月我在做什么"）。
 - **v1.3 语义搜索**：本地小模型 embedding，"北海道的雪景视频"。全程离线。
 - **v1.4 生态**：Raycast / Alfred 扩展、Shortcuts 动作、CLI 已有。

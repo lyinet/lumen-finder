@@ -31,6 +31,19 @@ jobs:
         with:
           workspaces: app/src-tauri
       - run: cargo install tauri-cli --version "^2" --locked
+      - name: Build the OCR helper (Apple Vision)
+        run: |
+          mkdir -p app/src-tauri/binaries
+          for arch in arm64 x86_64; do
+            swiftc -O -target $arch-apple-macos11 app/ocr/main.swift -o /tmp/lumen-ocr-$arch
+          done
+          lipo -create /tmp/lumen-ocr-arm64 /tmp/lumen-ocr-x86_64 -output /tmp/lumen-ocr
+          for t in universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
+            cp /tmp/lumen-ocr app/src-tauri/binaries/lumen-ocr-$t
+          done
+          # Smoke test on a screenshot of Lumen itself: it shows the word 合同.
+          /tmp/lumen-ocr docs/screenshots/quick.jpg | tee /tmp/ocr.txt | head -20
+          grep -q "合同" /tmp/ocr.txt
       - name: Build universal app
         working-directory: app/src-tauri
         env:

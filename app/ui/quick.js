@@ -16,7 +16,7 @@ const shortPath = p => home && p.startsWith(home) ? '~' + p.slice(home.length) :
 
 function row(f, terms, i) {
   const sub = f.snippet
-    ? `<span class="qs"><b>${T.in_text}</b>${highlight(f.snippet, terms)}</span>`
+    ? `<span class="qs"><b>${f.kind === 'image' ? T.in_image : T.in_text}</b>${highlight(f.snippet, terms)}</span>`
     : `<span>${esc(shortPath(f.parent))}</span>`
   return `<div class="qr ${i === sel ? 'on' : ''} ${f.offline ? 'off' : ''}" data-i="${i}">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>

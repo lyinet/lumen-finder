@@ -18,6 +18,8 @@ pub struct Config {
     pub include_hidden: bool,
     /// Read the words inside documents so search finds what a file says.
     pub content_search: bool,
+    /// Also read text in images and scanned PDFs (macOS Vision, on device).
+    pub ocr: bool,
     /// Index external drives under /Volumes too, and remember their files
     /// while they are unplugged.
     pub include_external: bool,
@@ -172,6 +174,7 @@ impl Default for Config {
             min_size: 1,
             include_hidden: false,
             content_search: true,
+            ocr: true,
             include_external: true,
             hotkey: DEFAULT_HOTKEY.to_string(),
             quick_panel: true,

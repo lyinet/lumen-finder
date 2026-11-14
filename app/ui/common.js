@@ -30,6 +30,15 @@ export function highlight(name, terms) {
 export const kc = k => `var(--k-${k})`
 
 export const ICON = {
+  collections: '<svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="M15 18 9 12l6-6"/></svg>',
+  c: {
+    invoices: '<svg viewBox="0 0 24 24"><path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>',
+    contracts: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M8 17c1.5-2 2.5-2 3 0s1.5 1 2.5-1M8 12h5"/></svg>',
+    ids: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="9" cy="11" r="2.2"/><path d="M5.8 16c.6-1.6 1.8-2.4 3.2-2.4s2.6.8 3.2 2.4M14.5 10h4M14.5 13.5h3"/></svg>',
+    screenshots: '<svg viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="8" y="8" width="8" height="8" rx="1.5"/></svg>',
+    resumes: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><circle cx="12" cy="11" r="2.3"/><path d="M8.5 17c.7-1.7 2-2.5 3.5-2.5s2.8.8 3.5 2.5"/></svg>',
+  },
   search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   recent: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   insights: '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
@@ -64,3 +73,8 @@ export function applyTheme(theme) {
   if (theme === 'light' || theme === 'dark') el.dataset.theme = theme
   else delete el.dataset.theme
 }
+
+/** Smart collections in display order, each with its hue. */
+export const COLLECTIONS = [
+  ['invoices', '#fbbf24'], ['contracts', '#60a5fa'], ['ids', '#34d399'], ['screenshots', '#22d3ee'], ['resumes', '#f472b6'],
+]

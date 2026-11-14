@@ -1,6 +1,6 @@
 import { api, isApp } from './bridge.js'
 import { T } from './i18n.js'
-import { ICON, esc, bytes, ago, highlight, kc, applyTheme } from './common.js'
+import { ICON, esc, bytes, ago, highlight, kc, applyTheme, COLLECTIONS } from './common.js'
 
 if (!isApp) document.body.classList.add('browser')
 
@@ -37,6 +37,7 @@ const state = {
 const NAV = [
   ['search', ICON.search, () => T.nav_search],
   ['recent', ICON.recent, () => T.nav_recent],
+  ['collections', ICON.collections, () => T.nav_collections],
   ['insights', ICON.insights, () => T.nav_insights],
   'sep',
   ['dupes', ICON.dupes, () => T.nav_dupes],
@@ -64,12 +65,13 @@ function movePill() {
   if (on && pill) pill.style.transform = `translateY(${on.offsetTop}px)`
 }
 function go(view) {
-  if (state.view === view && view !== 'search') return
+  if (state.view === view && view !== 'search' && !(view === 'collections' && state.collection)) return
+  if (view === 'collections' && state.view === 'collections') state.collection = null
   state.view = view; movePill(); render()
 }
 
 // ------------------------------------------------------------ views ------
-const VIEWS = { search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
+const VIEWS = { collections: viewCollections, search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
 function render() {
   const v = $('#view'); v.innerHTML = ''; v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter')
   VIEWS[state.view](v)
@@ -79,7 +81,7 @@ const volName = p => (p.match(/^\/Volumes\/([^/]+)/) || [])[1]
 function rowHTML(f, terms = [], i = 0, extra = '') {
   const vol = f.offline ? volName(f.path) : null
   const sub = f.snippet
-    ? `<div class="snip"><b>${T.in_text}</b><span>${highlight(f.snippet, terms)}</span></div>`
+    ? `<div class="snip"><b>${f.kind === 'image' || (f.kind === 'pdf' && f.ocr) ? T.in_image : T.in_text}</b><span>${highlight(f.snippet, terms)}</span></div>`
     : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
   return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
@@ -200,6 +202,37 @@ async function viewList(kind) {
   bindRows(sc)
   const items = await fn(60)
   $('#list', sc).innerHTML = items.map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">—</div>`
+}
+
+// ---- smart collections
+async function viewCollections(v) {
+  if (state.collection) return viewCollection(v, state.collection)
+  v.append(h(`<div class="head"><div><h1>${T.col_title}</h1><p>${T.col_sub}</p></div></div>`))
+  const sc = h('<div class="scroll"></div>'); v.append(sc)
+  const stats = await api.collections(), by = Object.fromEntries(stats.map(s => [s.id, s]))
+  const grid = h('<div class="grid cols"></div>'); sc.append(grid)
+  COLLECTIONS.forEach(([id, color], i) => {
+    const s = by[id] || { files: 0, bytes: 0, latest: 0 }
+    const c = h(`<button class="card col-card ${s.files ? '' : 'empty'}" style="--c:${color};animation-delay:${i * 50}ms"><div class="glow"></div>
+      <div class="col-icon">${ICON.c[id]}</div>
+      <div class="col-name">${T.col[id][0]}</div><div class="col-desc">${T.col[id][1]}</div>
+      <div class="col-foot"><span class="n" data-v="0">0</span><span>${s.files ? `${bytes(s.bytes)} · ${ago(s.latest)}` : T.col_none}</span></div></button>`)
+    c.onclick = () => { state.collection = id; render() }
+    grid.append(c); setTimeout(() => tween($('.n', c), s.files, { dur: 900 }), 100 + i * 50)
+  })
+  sc.append(h(`<p class="col-note">${T.col_note}</p>`))
+}
+async function viewCollection(v, id) {
+  const color = Object.fromEntries(COLLECTIONS)[id]
+  const head = h(`<div class="head"><div class="col-head" style="--c:${color}"><button class="back">${ICON.back}</button><div class="col-icon sm">${ICON.c[id]}</div>
+    <div><h1>${T.col[id][0]}</h1><p id="col-count"></p></div></div></div>`)
+  $('.back', head).onclick = () => { state.collection = null; render() }
+  v.append(head)
+  const sc = h('<div class="scroll"><div class="list" id="list"></div></div>'); v.append(sc)
+  bindRows(sc)
+  const items = await api.collection(id, 300)
+  $('#col-count').textContent = T.files(fmt(items.length))
+  $('#list', sc).innerHTML = items.map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">${T.col_none}</div>`
 }
 
 // ---- insights
@@ -328,6 +361,7 @@ async function viewSettings(v) {
   if (!snap.fullDiskAccess) form.prepend(fdaCard())
   const feats = h(`<div class="field"><h3>${T.set_features}</h3>
     ${toggleRow('content', T.set_content, T.set_content_p, snap.config.content_search !== false)}
+    ${toggleRow('ocr', T.set_ocr, T.set_ocr_p, snap.config.ocr !== false)}
     ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
   form.append(feats)
   const gen = h(`<div class="field"><h3>${T.set_general}</h3>
@@ -348,7 +382,7 @@ async function viewSettings(v) {
   })
   feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions(sw.dataset.k === 'content' ? { contentSearch: on } : { includeExternal: on })
+    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, external: { includeExternal: on } }[sw.dataset.k])
     state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
   })
   const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>
@@ -426,7 +460,7 @@ function toast(text) {
 addEventListener('keydown', e => {
   if ($('#menu') && e.key === 'Escape') return closeMenu()
   if (!$('#stage').hidden) return
-  if (e.metaKey && /^[1-7]$/.test(e.key)) { e.preventDefault(); go(NAV.filter(x => x !== 'sep')[Number(e.key) - 1][0]); return }
+  if (e.metaKey && /^[1-8]$/.test(e.key)) { e.preventDefault(); go(NAV.filter(x => x !== 'sep')[Number(e.key) - 1][0]); return }
   if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (state.view !== 'search') go('search'); else $('#q')?.select(); return }
   if (state.view !== 'search') return
   const q = $('#q'), f = selected()
