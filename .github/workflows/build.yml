@@ -34,14 +34,24 @@ jobs:
       - name: Build universal app
         working-directory: app/src-tauri
         env:
-          # Set these repository secrets to sign and notarize:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: cargo tauri build --target universal-apple-darwin
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Without a Developer ID certificate in the repo secrets, the app is
+        # ad-hoc signed (runs after right-click → Open). An empty
+        # APPLE_CERTIFICATE makes Tauri fail, so pass it only when it is set.
+        run: |
+          if [ -n "$CERT" ]; then
+            export APPLE_CERTIFICATE="$CERT" APPLE_CERTIFICATE_PASSWORD="$CERT_PASSWORD" \
+                   APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY" APPLE_ID="$NOTARY_ID" \
+                   APPLE_PASSWORD="$NOTARY_PASSWORD" APPLE_TEAM_ID="$TEAM_ID"
+          else
+            export APPLE_SIGNING_IDENTITY="-"
+          fi
+          cargo tauri build --target universal-apple-darwin
       - uses: actions/upload-artifact@v4
         with:
           name: Lumen-macos-universal
