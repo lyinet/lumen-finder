@@ -25,6 +25,18 @@
 
 <br>
 
+## ✦ New in v0.2: search what your files say
+
+<p align="center">
+  <img src="docs/screenshots/fulltext-en.jpg" alt="Full-text search" width="88%">
+</p>
+
+- **Full-text search** — reads Word, PDF, Markdown, text, RTF, HTML, PowerPoint, Excel, OpenDocument and EPUB. Type a phrase you remember and get the file, with the matching line. On this Mac only.
+- **External drives, even unplugged** — USB disks and SD cards are indexed; unplugged, their files stay searchable, marked "not connected". Plug back in and they resync.
+- **Clean up duplicates** — pick the copy to keep, send the rest to the Trash (Put Back works), or clean everything at once.
+- **Menu bar icon + custom hotkey** — record any shortcut to replace ⌥ Space; conflicts are caught.
+- **Full Disk Access guide** — detected, one click to the right System Settings pane.
+
 ## ✦ Why Lumen
 
 > Spotlight searches everything — mail, settings, web suggestions. Finder makes you wait.
@@ -110,9 +122,10 @@ Preview the UI without Rust: `cd app/ui && python3 -m http.server 8765`, then op
 
 ```
 app/ui              vanilla JS + CSS, no build step; mock data in a browser
-app/src-tauri       Tauri 2 shell: commands, events, ⌥Space, vibrancy
+app/src-tauri       Tauri 2 shell: commands, events, menu bar, hotkey, Trash, vibrancy
 crates/lumen-core   engine: exclusion rules · parallel scan · SQLite WAL + FTS5 trigram
                     · pinyin · generational incremental · FSEvents · duplicates (BLAKE3)
+                    · text extraction (docx/pptx/xlsx/pdf/epub/…) + content FTS · offline volumes
 crates/lumen-cli    command line
 ```
 
@@ -122,10 +135,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - [x] Full scan + live sync, substring/pinyin search, filters, insights, duplicates
 - [ ] Signed, notarized DMG + auto-update · Homebrew cask
-- [ ] Menu-bar mini search
-- [ ] Offline external drives
-- [ ] Move duplicates to Trash (undoable)
-- [ ] **Content search** for PDF / Word / Markdown, image **OCR** (on-device Apple Vision)
+- [x] Menu bar icon · custom hotkey · Full Disk Access guide <sub>v0.2</sub>
+- [x] Offline external drives <sub>v0.2</sub>
+- [x] Move duplicates to Trash <sub>v0.2</sub>
+- [x] **Content search** for PDF / Word / Markdown / PowerPoint / Excel / EPUB <sub>v0.2</sub>
+- [ ] Image and scanned-PDF **OCR** (on-device Apple Vision)
+- [ ] Compact menu-bar search panel · launch at login · light theme
 - [ ] Smart collections: invoices, contracts, ID photos, screenshots
 - [ ] On-device semantic search
 

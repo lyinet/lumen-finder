@@ -8,6 +8,10 @@
 //!   >100mb  <2gb          size bounds (kb, mb, gb)
 //!   after:2024-03 before:2025   modified date bounds (YYYY, YYYY-MM, YYYY-MM-DD)
 //!   "exact phrase"        quoted text kept together
+//!   name:合同             match the name only, never the words inside files
+//!
+//! Every word matches a file's name, pinyin or folder, or, for documents Lumen
+//! has read, the text inside it.
 
 use crate::index::{FileRecord, Index};
 use crate::kind::Kind;
@@ -36,6 +40,8 @@ pub struct SearchRequest {
     pub sort: Sort,
     pub limit: usize,
     pub offset: usize,
+    /// Match file names and folders only, not the words inside documents.
+    pub names_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +57,8 @@ pub struct SearchResponse {
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Parsed {
     pub terms: Vec<String>,
+    /// Terms that must match the name (name:…), never the content.
+    pub name_terms: Vec<String>,
     pub kinds: Vec<Kind>,
     pub exts: Vec<String>,
     pub folders: Vec<String>,
@@ -82,6 +90,11 @@ pub(crate) fn parse(q: &str) -> Parsed {
                             p.kinds.push(k);
                             continue;
                         }
+                    }
+                    "name" | "名" | "文件名" => {
+                        let orig = tok.split_once([':', '：']).map(|x| x.1).unwrap_or(val).to_string();
+                        p.name_terms.push(orig);
+                        continue;
                     }
                     "ext" | "后缀" => {
                         p.exts.push(val.trim_start_matches('.').to_string());
@@ -234,24 +247,63 @@ struct Where {
     args: Vec<Value>,
 }
 
-fn build_where(p: &Parsed, extra_kinds: &[Kind], with_kinds: bool) -> Where {
-    let mut w = Where { sql: Vec::new(), args: Vec::new() };
-    let mut fts: Vec<String> = Vec::new();
+/// Files whose text contains each two-character CJK word, found once per
+/// search and reused by the result, count and facet queries. A substring scan
+/// is linear in the stored text, so it stops after a few thousand hits:
+/// common words fill that quickly, and a list that long gets refined by
+/// typing more anyway.
+fn short_content_hits(conn: &rusqlite::Connection, p: &Parsed) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    let mut stmt = conn.prepare_cached("SELECT id FROM content WHERE instr(body, ?1) > 0 LIMIT 3000")?;
     for t in &p.terms {
-        // The trigram tokenizer needs three characters; shorter words
-        // (very common in Chinese: 简历, 合同) fall back to LIKE.
-        if t.chars().count() >= 3 {
-            fts.push(fts_quote(t));
+        if t.is_ascii() || t.chars().count() != 2 || out.contains_key(t) {
+            continue;
+        }
+        let ids: Vec<String> = stmt
+            .query_map([t], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .map(|i| i.to_string())
+            .collect();
+        out.insert(t.clone(), if ids.is_empty() { "-1".into() } else { ids.join(",") });
+    }
+    Ok(out)
+}
+
+fn build_where(
+    p: &Parsed,
+    extra_kinds: &[Kind],
+    with_kinds: bool,
+    content: bool,
+    short: &std::collections::HashMap<String, String>,
+) -> Where {
+    let mut w = Where { sql: Vec::new(), args: Vec::new() };
+    let terms = p.terms.iter().map(|t| (t, content)).chain(p.name_terms.iter().map(|t| (t, false)));
+    for (t, content) in terms {
+        let mut ors: Vec<String> = Vec::new();
+        let long = t.chars().count() >= 3;
+        // The trigram tokenizer needs three characters; shorter words (very
+        // common in Chinese: 简历, 合同) fall back to LIKE on the name.
+        if long {
+            ors.push("f.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)".into());
+            w.args.push(Value::Text(fts_quote(t)));
         } else {
-            w.sql.push("(f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\')".into());
+            ors.push("f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\'".into());
             let pat = like_escape(t);
             w.args.push(Value::Text(pat.clone()));
             w.args.push(Value::Text(pat));
         }
-    }
-    if !fts.is_empty() {
-        w.sql.push("f.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)".into());
-        w.args.push(Value::Text(fts.join(" AND ")));
+        if content {
+            if long {
+                ors.push("f.id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)".into());
+                w.args.push(Value::Text(fts_quote(t)));
+            } else if let Some(ids) = short.get(t) {
+                // Two Chinese characters: ids from one substring scan (integer
+                // literals only). One or two Latin letters would match nearly
+                // every document, so those stay name-only.
+                ors.push(format!("f.id IN ({ids})"));
+            }
+        }
+        w.sql.push(format!("({})", ors.join(" OR ")));
     }
     if with_kinds {
         let mut kinds: Vec<Kind> = p.kinds.clone();
@@ -299,26 +351,32 @@ impl Index {
         let limit = if req.limit == 0 { 60 } else { req.limit.min(500) };
         let conn = self.conn();
 
-        let w = build_where(&p, &req.kinds, true);
+        let content = !req.names_only;
+        let short = if content { short_content_hits(&conn, &p)? } else { Default::default() };
+        let w = build_where(&p, &req.kinds, true, content, &short);
         let where_sql = if w.sql.is_empty() { "1".to_string() } else { w.sql.join(" AND ") };
 
         // Relevance: exact name > name starts with > name contains > pinyin
         // > folder-only match, then the newest first.
         let mut order_args: Vec<Value> = Vec::new();
         let order = match req.sort {
-            Sort::Relevance if !p.terms.is_empty() => {
-                let q = p.terms.join(" ");
-                let first = p.terms[0].clone();
+            Sort::Relevance if !p.terms.is_empty() || !p.name_terms.is_empty() => {
+                let all: Vec<String> = p.terms.iter().chain(p.name_terms.iter()).cloned().collect();
+                let q = all.join(" ");
+                let first = all[0].clone();
                 order_args.push(Value::Text(q.clone()));
                 order_args.push(Value::Text(format!("{}%", first.replace(['%', '_'], ""))));
                 order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
+                order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
+                // A name or folder hit always outranks a match inside the text.
                 order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
                 "CASE
                     WHEN lower(substr(f.name, 1, length(f.name) - length(f.ext) - 1)) = lower(?) THEN 0
                     WHEN f.name LIKE ? THEN 1
                     WHEN f.name LIKE ? THEN 2
                     WHEN f.name_py LIKE ? THEN 3
-                    ELSE 4 END, f.mtime DESC"
+                    WHEN f.parent LIKE ? THEN 4
+                    ELSE 5 END, f.mtime DESC"
                     .to_string()
             }
             Sort::Relevance | Sort::Recent => "f.mtime DESC".into(),
@@ -334,10 +392,14 @@ impl Index {
         );
         let mut args = w.args.clone();
         args.extend(order_args);
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let hits = stmt
+        let mut stmt = conn.prepare(&sql)?;
+        let mut hits = stmt
             .query_map(rusqlite::params_from_iter(args.iter()), FileRecord::from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        if content && !p.terms.is_empty() {
+            add_snippets(&conn, &mut hits, &p.terms)?;
+        }
 
         let total: i64 = conn.query_row(
             &format!("SELECT count(*) FROM files f WHERE {where_sql}"),
@@ -345,10 +407,10 @@ impl Index {
             |r| r.get(0),
         )?;
 
-        let wk = build_where(&p, &[], false);
+        let wk = build_where(&p, &[], false, content, &short);
         let wk_sql = if wk.sql.is_empty() { "1".to_string() } else { wk.sql.join(" AND ") };
         let mut kind_counts = BTreeMap::new();
-        let mut stmt = conn.prepare_cached(&format!(
+        let mut stmt = conn.prepare(&format!(
             "SELECT f.kind, count(*) FROM files f WHERE {wk_sql} GROUP BY f.kind"
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(wk.args.iter()), |r| {
@@ -362,6 +424,23 @@ impl Index {
 
         Ok(SearchResponse { hits, total, kind_counts, took_us: started.elapsed().as_micros() as u64 })
     }
+}
+
+/// For hits whose name does not show why they matched, an excerpt of the
+/// text around the first matching word.
+fn add_snippets(conn: &rusqlite::Connection, hits: &mut [FileRecord], terms: &[String]) -> Result<()> {
+    let mut stmt = conn.prepare_cached("SELECT body FROM content WHERE id = ?1")?;
+    for h in hits.iter_mut() {
+        let name = h.name.to_lowercase();
+        if terms.iter().all(|t| name.contains(&t.to_lowercase())) {
+            continue;
+        }
+        let body: Option<String> = stmt.query_row([h.id], |r| r.get(0)).ok();
+        if let Some(body) = body {
+            h.snippet = crate::content::snippet(&body, terms, 28);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

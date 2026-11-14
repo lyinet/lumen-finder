@@ -21,6 +21,10 @@ const MAX_HOLD: Duration = Duration::from_secs(5);
 pub struct ChangeBatch {
     pub upserted: usize,
     pub removed: usize,
+    /// Documents whose words were (re)read after this batch.
+    pub content_read: u64,
+    /// A drive was plugged in or ejected: the app rescans to pick it up.
+    pub volumes_changed: bool,
 }
 
 pub struct Watcher {
@@ -52,6 +56,11 @@ impl Watcher {
                 log::warn!("cannot watch {}: {e}", r.display());
             }
         }
+        let volumes = PathBuf::from(crate::config::VOLUMES);
+        if cfg.include_external && volumes.is_dir() {
+            let _ = inner.watch(&volumes, RecursiveMode::NonRecursive);
+        }
+        let content = cfg.content_search;
         let filter = cfg.filter();
         let mut conn = index.writer()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -76,9 +85,18 @@ impl Watcher {
                 }
                 let paths: Vec<PathBuf> = pending.drain().collect();
                 first = None;
+                let volumes_changed = paths.iter().any(|p| p.parent() == Some(volumes.as_path()));
                 match apply_paths(&mut conn, &paths, &filter, &roots) {
-                    Ok((upserted, removed)) if upserted + removed > 0 => {
-                        on_change(ChangeBatch { upserted, removed })
+                    Ok((upserted, removed)) if upserted + removed > 0 || volumes_changed => {
+                        let mut content_read = 0;
+                        if content && upserted > 0 {
+                            let never = Arc::new(AtomicBool::new(false));
+                            match crate::content::index_pending(&mut conn, &never, |_| {}) {
+                                Ok(r) => content_read = r.read,
+                                Err(e) => log::warn!("content update failed: {e}"),
+                            }
+                        }
+                        on_change(ChangeBatch { upserted, removed, content_read, volumes_changed })
                     }
                     Ok(_) => {}
                     Err(e) => log::warn!("watcher apply failed: {e}"),

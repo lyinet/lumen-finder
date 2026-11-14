@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -58,6 +58,31 @@ CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name, name_py, parent ON f
 END;
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- v2: the words inside documents. One row per readable file, keyed by the
+-- file's id; size/mtime say which version of the file the text came from.
+CREATE TABLE IF NOT EXISTS content (
+    id    INTEGER PRIMARY KEY,
+    mtime INTEGER NOT NULL,
+    size  INTEGER NOT NULL,
+    body  TEXT NOT NULL DEFAULT ''
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
+    body, content='content', content_rowid='id', tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS content_ai AFTER INSERT ON content BEGIN
+    INSERT INTO content_fts(rowid, body) VALUES (new.id, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS content_ad AFTER DELETE ON content BEGIN
+    INSERT INTO content_fts(content_fts, rowid, body) VALUES ('delete', old.id, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE OF body ON content BEGIN
+    INSERT INTO content_fts(content_fts, rowid, body) VALUES ('delete', old.id, old.body);
+    INSERT INTO content_fts(rowid, body) VALUES (new.id, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS files_ad_content AFTER DELETE ON files BEGIN
+    DELETE FROM content WHERE id = old.id;
+END;
 "#;
 
 pub(crate) const UPSERT: &str = r#"
@@ -86,15 +111,24 @@ pub struct FileRecord {
     pub kind: Kind,
     pub size: i64,
     pub mtime: i64,
+    /// On an external drive that is not plugged in right now.
+    pub offline: bool,
+    /// Where the query matched inside the file, when it matched the words
+    /// rather than the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 impl FileRecord {
     pub(crate) const COLS: &'static str = "f.id, f.path, f.name, f.parent, f.ext, f.kind, f.size, f.mtime";
 
     pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
+        let path: String = r.get(1)?;
         Ok(FileRecord {
             id: r.get(0)?,
-            path: r.get(1)?,
+            offline: crate::config::volume_offline(Path::new(&path)),
+            snippet: None,
+            path,
             name: r.get(2)?,
             parent: r.get(3)?,
             ext: r.get(4)?,
@@ -182,7 +216,8 @@ impl Index {
         }
         let conn = open_conn(&path)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != 0 && version != SCHEMA_VERSION {
+        // v1 → v2 only added tables, which SCHEMA creates below.
+        if version != 0 && version != SCHEMA_VERSION && version != 1 {
             // Future migrations go here. The index is a cache of the disk, so
             // the safe fallback is always "drop and rescan".
             conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
@@ -230,6 +265,7 @@ impl Index {
             last_scan_at: num("last_scan_at")?,
             last_scan_ms: num("last_scan_ms")?,
             generation: num("generation")?.unwrap_or(0),
+            content_files: self.conn().query_row("SELECT count(*) FROM content WHERE body <> ''", [], |r| r.get(0))?,
         })
     }
 
@@ -242,6 +278,14 @@ impl Index {
     pub fn remove_path(&self, path: &str) -> Result<usize> {
         remove_tree(&self.conn(), path)
     }
+
+    /// The stored text of a file, if Lumen has read it.
+    pub fn content(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT body FROM content WHERE id = ?1 AND body <> ''", [id], |r| r.get(0))
+            .optional()?)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -251,6 +295,8 @@ pub struct IndexStatus {
     pub last_scan_at: Option<i64>,
     pub last_scan_ms: Option<i64>,
     pub generation: i64,
+    /// Documents whose words are searchable.
+    pub content_files: i64,
 }
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection> {

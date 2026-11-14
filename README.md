@@ -15,7 +15,7 @@
   <img alt="privacy" src="https://img.shields.io/badge/100%25-离线-ff9a76">
 </p>
 
-<h3 align="center">只记得名字里的两个字？拼音首字母也行。<br>Lumen 在几十毫秒内告诉你，它在哪。</h3>
+<h3 align="center">只记得名字里的两个字？拼音首字母也行。<br>连名字都忘了？说一句文件里写过的话。</h3>
 
 <br>
 
@@ -24,6 +24,25 @@
 </p>
 
 <br>
+
+## ✦ v0.2 新增：搜文件里写了什么
+
+<p align="center">
+  <img src="docs/screenshots/fulltext.jpg" alt="正文搜索：输入 合同期限，找到审计报告 PDF" width="88%">
+</p>
+
+- **正文搜索** — 读取 Word、PDF、Markdown、TXT、RTF、HTML、PPT、Excel、OpenDocument、EPUB 里的文字。输入"合同期限"，直接定位到写了这句话的审计报告，并显示原文片段。老 Windows 的 GBK 文本也能读。全部本机处理。
+- **外置硬盘离线索引** — 移动硬盘、U 盘自动收录；拔掉后文件照样搜得到，标注「Passport · 未连接」。插回自动补扫。
+- **重复文件一键清理** — 每组选一份保留，其余移到废纸篓（可在废纸篓"放回"），或一键清理全部。
+- **菜单栏图标 + 自定义快捷键** — 点菜单栏随时呼出；在设置里录制任意组合键替换 ⌥ Space，冲突时提示。
+- **完全磁盘访问引导** — 检测权限，一键跳到系统设置，避免逐个文件夹弹窗和漏扫。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dupes.jpg" alt="重复文件一键清理"><p align="center"><sub><b>重复文件</b> · 选保留哪份，其余进废纸篓</sub></p></td>
+<td width="50%"><img src="docs/screenshots/settings.jpg" alt="设置"><p align="center"><sub><b>设置</b> · 权限引导、正文搜索、外置硬盘、快捷键</sub></p></td>
+</tr>
+</table>
 
 ## ✦ 为什么是 Lumen
 
@@ -82,7 +101,7 @@
 </tr>
 <tr>
 <td><img src="docs/screenshots/insights.jpg" alt="洞察"><p align="center"><sub><b>洞察</b> · 你的视频散落在多少个文件夹里？</sub></p></td>
-<td><img src="docs/screenshots/dupes.jpg" alt="重复文件"><p align="center"><sub><b>重复文件</b> · 内容指纹比对，按可释放空间排序</sub></p></td>
+<td><img src="docs/screenshots/offline.jpg" alt="外置硬盘"><p align="center"><sub><b>外置硬盘</b> · 拔掉也能搜到，标注未连接</sub></p></td>
 </tr>
 </table>
 
@@ -92,7 +111,8 @@
 
 | 写法 | 含义 |
 |---|---|
-| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母 |
+| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母；也匹配文档正文 |
+| `name:合同` | 只匹配文件名，不搜正文 |
 | `kind:pdf` `类型:音乐` | 按类型：文档 · 表格 · 演示 · PDF · 电子书 · 音乐 · 视频 · 图片 · 压缩包 · 设计 |
 | `ext:key` | 按扩展名 |
 | `in:Downloads` | 路径中包含 |
@@ -129,7 +149,7 @@ cd app/ui && python3 -m http.server 8765
 <summary><b>命令行</b>（与 App 共用索引）</summary>
 
 ```bash
-cargo run -p lumen-cli -- scan ~
+cargo run -p lumen-cli -- scan ~          # 扫描后自动读取正文
 cargo run -p lumen-cli -- search 合同 kind:pdf
 cargo run -p lumen-cli -- stats
 cargo run -p lumen-cli -- dupes
@@ -140,9 +160,10 @@ cargo run -p lumen-cli -- dupes
 
 ```
 app/ui              原生 JS + CSS，零构建；浏览器中自动使用模拟数据
-app/src-tauri       Tauri 2 外壳：命令、事件、⌥Space、毛玻璃窗口
+app/src-tauri       Tauri 2 外壳：命令、事件、菜单栏、可改快捷键、废纸篓、毛玻璃窗口
 crates/lumen-core   引擎：排除规则 · 并行扫描 · SQLite WAL + FTS5 trigram
                     · 拼音索引 · 增量（generation）· FSEvents 监听 · 重复文件（BLAKE3）
+                    · 正文提取（docx/pptx/xlsx/pdf/epub/…）+ 正文 FTS · 外置卷离线保留
 crates/lumen-cli    命令行
 ```
 
@@ -152,10 +173,12 @@ crates/lumen-cli    命令行
 
 - [x] 全盘扫描 + 实时增量、中文/拼音搜索、筛选语法、洞察、重复文件
 - [ ] 签名公证 DMG + 自动更新 · Homebrew cask
-- [ ] 菜单栏迷你搜索窗
-- [ ] 外置硬盘离线索引（"在 移动硬盘 上，未连接"）
-- [ ] 重复文件一键移到废纸篓（可撤销）
-- [ ] **正文搜索** PDF / Word / Markdown，图片 **OCR**（本地 Apple Vision）
+- [x] 菜单栏入口 · 自定义呼出快捷键 · 完全磁盘访问引导 <sub>v0.2</sub>
+- [x] 外置硬盘离线索引（"Passport · 未连接"）<sub>v0.2</sub>
+- [x] 重复文件一键移到废纸篓 <sub>v0.2</sub>
+- [x] **正文搜索** PDF / Word / Markdown / PPT / Excel / EPUB <sub>v0.2</sub>
+- [ ] 图片与扫描件 **OCR**（本地 Apple Vision）
+- [ ] 菜单栏紧凑搜索小窗 · 开机自启 · 浅色主题
 - [ ] 智能合集：发票、合同、证件照、截图
 - [ ] 本地语义搜索："北海道的雪景视频"
 

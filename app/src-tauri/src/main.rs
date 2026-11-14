@@ -1,21 +1,24 @@
 // Lumen — the macOS shell around lumen-core.
 //
-// Responsibilities: own the index and config, run scans off the main thread
-// and stream progress to the UI, keep the FSEvents watcher alive, expose
-// Finder actions (open, reveal, Quick Look) and the ⌥Space summon hotkey.
+// Responsibilities: own the index and config, run scans and content reading
+// off the main thread and stream progress to the UI, keep the FSEvents watcher
+// alive, expose Finder actions (open, reveal, Quick Look, move to Trash), the
+// menu bar icon and the configurable summon hotkey.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use lumen_core::{
-    scan, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Overview, SearchRequest,
-    SearchResponse, Watcher,
+    index_content, scan, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Overview,
+    SearchRequest, SearchResponse, Watcher,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct AppState {
     index: Arc<Index>,
@@ -24,6 +27,8 @@ struct AppState {
     scanning: Arc<AtomicBool>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     watcher: Mutex<Option<Watcher>>,
+    reading: Arc<AtomicBool>,
+    read_cancel: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 type Res<T> = Result<T, String>;
@@ -40,6 +45,10 @@ struct Snapshot {
     scanning: bool,
     first_run: bool,
     home: String,
+    reading: bool,
+    /// Full Disk Access granted (macOS). Without it every protected folder
+    /// asks separately and some (Mail downloads, iCloud) stay hidden.
+    full_disk_access: bool,
 }
 
 #[tauri::command]
@@ -51,6 +60,8 @@ fn snapshot(state: State<AppState>) -> Res<Snapshot> {
         config: state.config.lock().unwrap().clone(),
         scanning: state.scanning.load(Ordering::Relaxed),
         home: lumen_home(),
+        reading: state.reading.load(Ordering::Relaxed),
+        full_disk_access: has_full_disk_access(),
     })
 }
 
@@ -119,6 +130,9 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
                 Ok(report) => {
                     let _ = app.emit("scan://done", &report);
                     restart_watcher(&app);
+                    if !report.cancelled && cfg.content_search {
+                        run_content(&app);
+                    }
                 }
                 Err(e) => {
                     let _ = app.emit("scan://error", e.to_string());
@@ -134,6 +148,35 @@ fn cancel_scan(state: State<AppState>) {
     if let Some(c) = state.cancel.lock().unwrap().as_ref() {
         c.store(true, Ordering::Relaxed);
     }
+    if let Some(c) = state.read_cancel.lock().unwrap().as_ref() {
+        c.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Read the words of new and changed documents, after a scan.
+fn run_content(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.reading.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    *state.read_cancel.lock().unwrap() = Some(cancel.clone());
+    let index = state.index.clone();
+    let reading = state.reading.clone();
+    let app = app.clone();
+    let _ = std::thread::Builder::new().name("lumen-content".into()).spawn(move || {
+        let emitter = app.clone();
+        let r = index_content(&index, cancel, |p| {
+            let _ = emitter.emit("content://progress", p);
+        });
+        reading.store(false, Ordering::SeqCst);
+        match r {
+            Ok(report) => {
+                let _ = app.emit("content://done", &report);
+            }
+            Err(e) => log::warn!("content indexing failed: {e}"),
+        }
+    });
 }
 
 fn restart_watcher(app: &AppHandle) {
@@ -143,7 +186,17 @@ fn restart_watcher(app: &AppHandle) {
     let mut slot = state.watcher.lock().unwrap();
     *slot = None; // stop the old stream first
     match Watcher::start(&state.index, &cfg, move |batch| {
+        let plugged = batch.volumes_changed;
         let _ = emitter.emit("index://changed", batch);
+        if plugged {
+            // A drive came or went: pick up its files, or mark them offline.
+            let app = emitter.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let state = app.state::<AppState>();
+                let _ = run_scan(&app, &state);
+            });
+        }
     }) {
         Ok(w) => *slot = Some(w),
         Err(e) => log::warn!("watcher failed to start: {e}"),
@@ -172,6 +225,98 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
     };
     run_scan(&app, &state)?;
     Ok(cfg)
+}
+
+/// Content search and external drives on or off.
+#[tauri::command]
+fn set_options(
+    app: AppHandle,
+    state: State<AppState>,
+    content_search: Option<bool>,
+    include_external: Option<bool>,
+) -> Res<Config> {
+    let cfg = {
+        let mut cfg = state.config.lock().unwrap();
+        if let Some(v) = content_search {
+            cfg.content_search = v;
+        }
+        if let Some(v) = include_external {
+            cfg.include_external = v;
+        }
+        cfg.save(&state.config_path).map_err(err)?;
+        cfg.clone()
+    };
+    run_scan(&app, &state)?;
+    Ok(cfg)
+}
+
+/// Change the summon shortcut. The old one stays if the new one is taken.
+#[tauri::command]
+fn set_hotkey(app: AppHandle, state: State<AppState>, hotkey: String) -> Res<Config> {
+    let new: Shortcut = hotkey.parse().map_err(|_| "invalid".to_string())?;
+    let old = state.config.lock().unwrap().hotkey.clone();
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    if gs.register(new).is_err() {
+        if let Ok(o) = old.parse::<Shortcut>() {
+            let _ = gs.register(o);
+        }
+        return Err("taken".into());
+    }
+    let mut cfg = state.config.lock().unwrap();
+    cfg.hotkey = hotkey;
+    cfg.save(&state.config_path).map_err(err)?;
+    Ok(cfg.clone())
+}
+
+#[derive(Serialize)]
+struct Trashed {
+    count: usize,
+    bytes: u64,
+}
+
+/// Move files to the Trash (Finder's "Put Back" restores them) and forget
+/// them. Used by the duplicates view.
+#[tauri::command]
+fn trash_paths(state: State<AppState>, paths: Vec<String>) -> Res<Trashed> {
+    let present: Vec<&String> = paths.iter().filter(|p| Path::new(p).exists()).collect();
+    let bytes = present.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    trash::delete_all(&present).map_err(err)?;
+    for p in &paths {
+        let _ = state.index.remove_path(p);
+    }
+    Ok(Trashed { count: present.len(), bytes })
+}
+
+/// Probe a file only readable with Full Disk Access. Not found anywhere means
+/// we cannot tell, which we treat as granted rather than nag.
+fn has_full_disk_access() -> bool {
+    if !cfg!(target_os = "macos") {
+        return true;
+    }
+    let home = PathBuf::from(lumen_home());
+    let probes = [
+        home.join("Library/Safari/Bookmarks.plist"),
+        home.join("Library/Application Support/com.apple.TCC/TCC.db"),
+        PathBuf::from("/Library/Application Support/com.apple.TCC/TCC.db"),
+    ];
+    for p in probes {
+        match std::fs::File::open(&p) {
+            Ok(_) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return false,
+            Err(_) => continue,
+        }
+    }
+    true
+}
+
+#[tauri::command]
+fn open_fda_settings() -> Res<()> {
+    Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .map_err(err)?;
+    Ok(())
 }
 
 /// Every Finder action first checks the file is still there; a file that
@@ -227,15 +372,56 @@ fn toggle_main(app: &AppHandle) {
     }
 }
 
-fn main() {
-    let summon = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+/// The menu bar icon: click to summon, menu for the rest.
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let zh = std::env::var("LANG").map(|l| l.starts_with("zh")).unwrap_or(false)
+        || sys_locale_is_zh();
+    let t = |zh_s: &'static str, en: &'static str| if zh { zh_s } else { en };
+    let show = MenuItem::with_id(app, "show", t("打开 Lumen", "Open Lumen"), true, None::<&str>)?;
+    let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "Rescan Now"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
+    let menu = Menu::with_items(app, &[&show, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+    TrayIconBuilder::with_id("lumen")
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip("Lumen")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, e| match e.id.as_ref() {
+            "show" => toggle_main(app),
+            "rescan" => {
+                let state = app.state::<AppState>();
+                let _ = run_scan(app, &state);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, ev| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+                toggle_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
 
+fn sys_locale_is_zh() -> bool {
+    Command::new("defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("zh"))
+        .unwrap_or(false)
+}
+
+fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed && shortcut == &summon {
+                .with_handler(move |app, _shortcut, event| {
+                    // Lumen registers exactly one shortcut: the summon key.
+                    if event.state() == ShortcutState::Pressed {
                         toggle_main(app);
                     }
                 })
@@ -256,10 +442,21 @@ fn main() {
                 scanning: Arc::new(AtomicBool::new(false)),
                 cancel: Mutex::new(None),
                 watcher: Mutex::new(None),
+                reading: Arc::new(AtomicBool::new(false)),
+                read_cancel: Mutex::new(None),
             });
 
-            if let Err(e) = app.global_shortcut().register(summon) {
-                log::warn!("⌥Space is taken by another app: {e}");
+            let hotkey = app.state::<AppState>().config.lock().unwrap().hotkey.clone();
+            match hotkey.parse::<Shortcut>() {
+                Ok(sc) => {
+                    if let Err(e) = app.global_shortcut().register(sc) {
+                        log::warn!("{hotkey} is taken by another app: {e}");
+                    }
+                }
+                Err(_) => log::warn!("invalid hotkey in config: {hotkey}"),
+            }
+            if let Err(e) = build_tray(app) {
+                log::warn!("menu bar icon unavailable: {e}");
             }
 
             if had_index {
@@ -293,6 +490,10 @@ fn main() {
             cancel_scan,
             set_roots,
             set_excluded,
+            set_options,
+            set_hotkey,
+            trash_paths,
+            open_fda_settings,
             open_path,
             reveal,
             quick_look

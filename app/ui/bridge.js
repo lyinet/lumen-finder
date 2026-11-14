@@ -24,6 +24,10 @@ function realBridge() {
     open: path => invoke('open_path', { path }),
     reveal: path => invoke('reveal', { path }),
     quickLook: path => invoke('quick_look', { path }),
+    trash: paths => invoke('trash_paths', { paths }),
+    setOptions: opts => invoke('set_options', opts),
+    setHotkey: hotkey => invoke('set_hotkey', { hotkey }),
+    openFdaSettings: () => invoke('open_fda_settings'),
     pickFolder: async () => tauri.dialog ? tauri.dialog.open({ directory: true, multiple: false }) : null,
     on: (event, cb) => listen(event, e => cb(e.payload)),
   }
@@ -64,8 +68,26 @@ function mockBridge() {
     files.push({ id: i + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind,
       size: Math.floor(SZ[kind] * (0.05 + rnd() * 2)), mtime: now - Math.floor(Math.pow(rnd(), 2.2) * 6 * 365 * 86400) })
   }
+  // Some documents carry text, so content search can be previewed.
+  const TEXTS = [
+    ['document', '租房合同扫描说明', 'md', 'Documents/个人', '房屋租赁合同，租期三年，自 2024 年 3 月 1 日起，月租金 6500 元，押一付三。'],
+    ['pdf', '2023 年度审计报告', 'pdf', 'Documents/财务/2024', '本年度营业收入同比增长 42%，主要来自海外市场；合同期限内无重大违约事项。'],
+    ['presentation', '季度复盘', 'pptx', 'Documents/工作', 'Q3 复盘：用户留存提升到 61%，下季度重点是会员体系和合同续签。'],
+    ['document', '读书笔记 - 置身事内', 'docx', 'Documents/学习/研究生', '地方政府的土地财政与招商引资，决定了过去二十年的城市化速度。'],
+    ['pdf', 'Quarterly report Q3', 'pdf', 'Downloads', 'Quarterly revenue grew 42% year over year, led by subscriptions in Japan and Korea.'],
+    ['spreadsheet', '家庭预算2025', 'xlsx', 'Documents/个人', '房贷 8200 · 物业 460 · 孩子兴趣班 1800 · 旅行基金 3000 · 合同保险 920'],
+  ]
+  for (const [kind, base, ext, folder, text] of TEXTS) {
+    const parent = `${HOME}/${folder}`
+    files.push({ id: files.length + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind, size: 380000, mtime: now - 86400 * (3 + files.length % 40), text })
+  }
+  for (const [name, kind, ext] of [['北海道旅行 原片', 'video', 'mov'], ['相册备份 2019', 'archive', 'zip'], ['合同扫描 归档', 'pdf', 'pdf']]) {
+    const parent = '/Volumes/Passport/归档'
+    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 2.4e9, mtime: now - 86400 * 400, offline: true })
+  }
   let scanned = !location.hash.includes('first')
   const listeners = {}
+  const opts = { content_search: true, include_external: true, hotkey: 'Alt+Space' }
   const emit = (e, p) => (listeners[e] || []).forEach(cb => cb(p))
   const ALIAS = { 文档: 'document', 音乐: 'audio', 视频: 'video', 图片: 'image', 照片: 'image', music: 'audio', doc: 'document', photo: 'image' }
 
@@ -77,23 +99,31 @@ function mockBridge() {
       if (m) { const k = ALIAS[m[2]] || m[2]; if (KINDS.includes(k)) kinds.push(k); continue }
       terms.push(tok.toLowerCase())
     }
-    const base = files.filter(f => terms.every(t => f.name.toLowerCase().includes(t) || f.parent.toLowerCase().includes(t)))
+    const inName = (f, t) => f.name.toLowerCase().includes(t) || f.parent.toLowerCase().includes(t)
+    const base = files.filter(f => terms.every(t => inName(f, t) || (f.text || '').toLowerCase().includes(t)))
     const kind_counts = {}
     base.forEach(f => kind_counts[f.kind] = (kind_counts[f.kind] || 0) + 1)
     let hits = kinds.length ? base.filter(f => kinds.includes(f.kind)) : base
     const s = req.sort || 'relevance'
-    const score = f => terms.length ? (f.name.toLowerCase().startsWith(terms[0]) ? 0 : f.name.toLowerCase().includes(terms[0]) ? 1 : 2) : 0
+    const score = f => terms.length ? (f.name.toLowerCase().startsWith(terms[0]) ? 0 : f.name.toLowerCase().includes(terms[0]) ? 1 : inName(f, terms[0]) ? 2 : 3) : 0
     hits = [...hits].sort((a, b) => s === 'largest' ? b.size - a.size : s === 'name' ? a.name.localeCompare(b.name) :
       s === 'relevance' ? (score(a) - score(b)) || (b.mtime - a.mtime) : b.mtime - a.mtime)
     const off = req.offset || 0
-    return { hits: hits.slice(off, off + (req.limit || 60)), total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
+    const snip = f => {
+      if (!f.text || terms.every(t => f.name.toLowerCase().includes(t))) return undefined
+      const t = terms.find(t => f.text.toLowerCase().includes(t)); if (!t) return undefined
+      const i = f.text.toLowerCase().indexOf(t), a = Math.max(0, i - 18)
+      return (a ? '…' : '') + f.text.slice(a, i + t.length + 36) + (i + t.length + 36 < f.text.length ? '…' : '')
+    }
+    const page = hits.slice(off, off + (req.limit || 60)).map(f => ({ ...f, offline: !!f.offline, snippet: snip(f), text: undefined }))
+    return { hits: page, total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
   }
 
   return {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
-      config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false },
-      scanning: false, firstRun: !scanned, home: HOME,
+      config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
+      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'),
     }),
     search: async req => query(req),
     overview: async () => {
@@ -127,10 +157,17 @@ function mockBridge() {
         if (p >= 1) {
           clearInterval(tick); scanned = true
           setTimeout(() => emit('scan://done', { generation: 1, full: true, cancelled: false, files: total, bytes: 1.9e12, added: total, changed: 0, removed: 0, dirs: 9812, elapsed_ms: D }), 400)
+          let d = 0; const T2 = 6120
+          const rt = setInterval(() => { d = Math.min(T2, d + 410); emit('content://progress', { done: d, total: T2, current: '', finished: d >= T2 })
+            if (d >= T2) { clearInterval(rt); emit('content://done', { read: T2, with_text: 5874, failed: 12, elapsed_ms: 9100, cancelled: false }) } }, 120)
         }
       }, 90)
     },
     cancelScan: async () => {},
+    trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
+    setOptions: async o => { if (o.contentSearch !== undefined) opts.content_search = o.contentSearch; if (o.includeExternal !== undefined) opts.include_external = o.includeExternal; return opts },
+    setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
+    openFdaSettings: async () => {},
     setRoots: async roots => ({ roots }),
     setExcluded: async p => ({ excluded_paths: p }),
     open: async () => {}, reveal: async () => {}, quickLook: async () => {},

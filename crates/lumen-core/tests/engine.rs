@@ -103,3 +103,101 @@ fn watcher_apply_paths() {
     let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
     assert!(q(&index, "报价").is_empty());
 }
+
+fn docx(p: &Path, text: &str) {
+    use std::io::Write;
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    let mut z = zip::ZipWriter::new(fs::File::create(p).unwrap());
+    let o = zip::write::SimpleFileOptions::default();
+    z.start_file("[Content_Types].xml", o).unwrap();
+    z.write_all(b"<Types/>").unwrap();
+    z.start_file("word/document.xml", o).unwrap();
+    write!(z, "<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>").unwrap();
+    z.finish().unwrap();
+}
+
+/// A one-page PDF with a real text layer, built by hand.
+fn pdf(p: &Path, text: &str) {
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+    for o in offs {
+        out.push_str(&format!("{o:010} 00000 n \n"));
+    }
+    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1));
+    touch(p, out.as_bytes());
+}
+
+#[test]
+fn content_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("Notes/随手记.md"), "# 周末\n去京都看红叶，顺便买抹茶。".as_bytes());
+    docx(&home.join("Work/agreement.docx"), "本合同期限为三年，自 2024 年 1 月 1 日起生效。");
+    let (gbk, _, _) = encoding_rs::GB18030.encode("老电脑里的会议纪要：预算批准");
+    touch(&home.join("Old/minutes.txt"), &gbk);
+    pdf(&home.join("Finance/report.pdf"), "Quarterly revenue grew forty percent");
+    touch(&home.join("Movies/clip.mov"), b"not text");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+
+    let mut last = None;
+    let r = index_content(&index, Arc::new(AtomicBool::new(false)), |p| last = Some(p.clone())).unwrap();
+    assert_eq!(r.read, 4, "md, docx, txt, pdf");
+    assert_eq!(r.with_text, 4);
+    assert!(last.unwrap().finished);
+    assert_eq!(index.status().unwrap().content_files, 4);
+
+    // ≥3 chars → content FTS; 2 CJK chars → substring scan.
+    assert_eq!(q(&index, "看红叶"), vec!["随手记.md"]);
+    assert_eq!(q(&index, "抹茶"), vec!["随手记.md"]);
+    assert_eq!(q(&index, "期限为三年"), vec!["agreement.docx"]);
+    assert_eq!(q(&index, "会议纪要"), vec!["minutes.txt"]);
+    assert_eq!(q(&index, "revenue grew"), vec!["report.pdf"]);
+    assert_eq!(q(&index, "revenue kind:pdf"), vec!["report.pdf"]);
+    assert!(q(&index, "name:revenue").is_empty(), "name: skips content");
+
+    let res = index.search(&SearchRequest { query: "期限".into(), ..Default::default() }).unwrap();
+    let snip = res.hits[0].snippet.clone().unwrap();
+    assert!(snip.contains("期限"), "{snip}");
+    let res = index.search(&SearchRequest { query: "期限".into(), names_only: true, ..Default::default() }).unwrap();
+    assert_eq!(res.total, 0);
+
+    // Second pass reads nothing; an edited file is read again.
+    assert_eq!(index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap().read, 0);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    touch(&home.join("Notes/随手记.md"), "改成去北海道滑雪".as_bytes());
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap().read, 1);
+    assert!(q(&index, "看红叶").is_empty());
+    assert_eq!(q(&index, "北海道"), vec!["随手记.md"]);
+
+    // Deleting the file drops its text too.
+    fs::remove_file(home.join("Work/agreement.docx")).unwrap();
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert!(q(&index, "期限为三年").is_empty());
+    assert_eq!(index.status().unwrap().content_files, 3);
+}
+
+#[test]
+fn volume_paths() {
+    use std::path::PathBuf;
+    assert_eq!(config::volume_root(Path::new("/Volumes/Passport/Movies/a.mp4")), Some(PathBuf::from("/Volumes/Passport")));
+    assert_eq!(config::volume_root(Path::new("/Users/a/x")), None);
+    assert!(config::volume_offline(Path::new("/Volumes/__lumen_not_mounted__/a.mp4")));
+    assert!(!config::volume_offline(Path::new("/Users/a/x")));
+}

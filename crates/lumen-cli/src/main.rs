@@ -2,6 +2,7 @@
 //!
 //!   lumen scan [ROOT…]          full or incremental scan
 //!   lumen search QUERY…         search (supports kind:, ext:, in:, >10mb, after:…)
+//!   lumen content               read the words inside documents (正文搜索)
 //!   lumen stats                 totals by kind, scattered folders
 //!   lumen dupes                 likely duplicate files
 //!   lumen --db PATH …           use another index file
@@ -46,14 +47,21 @@ fn main() -> Result<()> {
                     r.removed
                 );
             }
+            if cfg.content_search && !r.cancelled {
+                read_content(&index, json)?;
+            }
         }
+        "content" => read_content(&index, json)?,
         "search" | "s" => {
             let r = index.search(&SearchRequest { query: args.join(" "), limit: 30, ..Default::default() })?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else {
                 for h in &r.hits {
-                    println!("{:<12} {:>9}  {}", h.kind.slug(), human(h.size), h.path);
+                    println!("{:<12} {:>9}  {}{}", h.kind.slug(), human(h.size), h.path, if h.offline { "  (offline)" } else { "" });
+                    if let Some(s) = &h.snippet {
+                        println!("{:>24}{s}", "");
+                    }
                 }
                 println!("— {} matches in {:.1} ms", r.total, r.took_us as f64 / 1000.0);
             }
@@ -84,8 +92,23 @@ fn main() -> Result<()> {
             }
         }
         _ => {
-            println!("lumen scan [ROOT…] | search QUERY | stats | dupes   [--db PATH] [--json]");
+            println!("lumen scan [ROOT…] | content | search QUERY | stats | dupes   [--db PATH] [--json]");
         }
+    }
+    Ok(())
+}
+
+fn read_content(index: &Index, json: bool) -> Result<()> {
+    let r = index_content(index, Arc::new(AtomicBool::new(false)), |p| {
+        if !json && !p.finished {
+            eprint!("\r\x1b[2K  reading {}/{} documents", p.done, p.total);
+        }
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+    } else {
+        eprintln!();
+        println!("Read {} documents ({} with text, {} unreadable) in {:.2}s", r.read, r.with_text, r.failed, r.elapsed_ms as f64 / 1000.0);
     }
     Ok(())
 }

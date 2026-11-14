@@ -72,3 +72,48 @@ builds a fake home folder (with Library, node_modules, a Photos library,
 dotfiles, lock files) and checks exclusion, Chinese/pinyin search, filters,
 relevance, facets, duplicates, incremental add/change/delete and the live
 watcher.
+
+## Full-text search (v0.2)
+
+- `content(id, mtime, size, body)` holds up to 120k characters per readable
+  document, keyed by the file's id; `content_fts` is an external-content FTS5
+  trigram index over `body`. Triggers keep both in step, and deleting a row from
+  `files` deletes its text.
+- `index_content` selects files whose extension is readable and whose
+  size/mtime differ from the stored text, extracts on up to 6 worker threads
+  (PDF parsing is CPU-bound) and writes in batches of 64 on one connection. A
+  panicking PDF parser is caught per file.
+- Query: each word is `(name/pinyin/folder match) OR (content match)`. Words of
+  3+ characters use the trigram index; 2-character CJK words fall back to
+  `instr(body, ?)`; 1–2 Latin letters stay name-only (they would match nearly
+  every document). Name hits rank above text-only hits. Snippets are cut in
+  Rust around the first matching word for hits whose name does not explain the
+  match.
+- Extraction is pure Rust: zip + markup stripping for Office/OpenDocument/EPUB,
+  `pdf-extract` for PDF text layers, a small RTF reader, and UTF-8 / UTF-16 /
+  GB18030 detection for plain text. OCR for images and scanned PDFs is left to
+  Apple Vision in a later version.
+
+## External drives (v0.2)
+
+`/Volumes/*` directories are added as roots when `include_external` is on,
+skipping the boot volume (a symlink), Time Machine targets and mounted
+installer images. At the end of a scan, rows under a `/Volumes/<name>` that is
+not mounted are kept instead of deleted, and `FileRecord.offline` marks them.
+The watcher also watches `/Volumes` itself (non-recursively) so a mount or eject
+triggers a rescan.
+
+### Measured (Linux sandbox, release build, 4,000 Markdown/TXT files, 30 MB, mostly Chinese)
+
+| | |
+|---|---|
+| name scan | 0.13 s |
+| reading all document text (first time) | 11.2 s, then only changed files |
+| `违约金` (3+ chars, trigram FTS) | 5.8 ms, 2,553 hits |
+| `合同` (2 chars, substring scan once per search) | 71 ms |
+| `北海道雪景` | 0.9 ms |
+| index size | 163 MB (CJK trigrams are dense) |
+
+Two-character Chinese words are the slow path and grow linearly with stored
+text; a bigram side table (or FTS5 `unicode61` over pre-split CJK bigrams) is
+the planned fix. Index size is the other cost to watch on large libraries.

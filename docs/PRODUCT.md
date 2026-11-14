@@ -23,15 +23,16 @@
 - [x] ⌥Space summon, keyboard-first, Quick Look, reveal
 - [x] Insights, duplicates, forgotten files
 - [ ] Notarized universal DMG + Sparkle-style auto-update (tauri-plugin-updater)
-- [ ] Menu-bar extra with a compact search panel (Spotlight-like, separate window)
-- [ ] External drives: index offline volumes, show "on drive X (not connected)"
-- [ ] Move duplicates to Trash (with undo), "Clean up" flow from Insights
-- [ ] Settings: hotkey rebinding, launch at login, light/dark/auto
-- [ ] Onboarding asks for Full Disk Access with a one-click deep link
+- [~] Menu-bar extra (v0.2: icon + menu); compact search panel still to do
+- [x] External drives: index offline volumes, show "on drive X (not connected)" (v0.2)
+- [x] Move duplicates to Trash (Put Back from Trash), clean-up-all (v0.2)
+- [~] Settings: hotkey rebinding (v0.2); launch at login, light/dark/auto to do
+- [x] Onboarding asks for Full Disk Access with a one-click deep link (v0.2)
 - [ ] English + 简体中文 + 繁體中文 copy review
 
 ## Roadmap after launch
-- **v1.1 内容搜索 (Pro)**：PDF/Word/Markdown 正文全文检索、图片 OCR（Apple Vision 免费本地）。"我记得里面写了'违约金'"。
+- **正文搜索已在 v0.2 免费提供**（文字层：PDF/Word/Markdown/PPT/Excel/EPUB）。决策理由：这是对比 Spotlight/Finder 最直观的卖点，放进免费版拉新；Pro 改为承载更重的能力。
+- **v1.1 OCR (Pro)**：图片、截图、扫描版 PDF 的文字识别（Apple Vision 本地）。"我记得截图里写了'违约金'"。
 - **v1.2 智能视图**：自动整理"发票""合同""证件照""截图"等智能合集；时间线视图（"去年 11 月我在做什么"）。
 - **v1.3 语义搜索**：本地小模型 embedding，"北海道的雪景视频"。全程离线。
 - **v1.4 生态**：Raycast / Alfred 扩展、Shortcuts 动作、CLI 已有。

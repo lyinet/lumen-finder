@@ -112,17 +112,24 @@ pub fn scan(
     let mut removed = 0i64;
     if !cancelled {
         // Files not stamped this generation are gone, except under roots that
-        // are configured but not mounted right now (an unplugged drive).
+        // are configured but not mounted right now (an unplugged drive): those
+        // are kept and shown as offline.
         let offline: Vec<PathBuf> = cfg.roots.iter().filter(|r| !r.is_dir()).cloned().collect();
         let tx = writer.transaction()?;
-        if offline.is_empty() {
+        let has_volume_rows: bool = tx
+            .query_row("SELECT 1 FROM files WHERE seen_gen < ?1 AND path LIKE '/Volumes/%' LIMIT 1", [gen], |_| Ok(true))
+            .unwrap_or(false);
+        if offline.is_empty() && !has_volume_rows {
             removed = tx.execute("DELETE FROM files WHERE seen_gen < ?1", [gen])? as i64;
         } else {
             let mut stmt = tx.prepare("SELECT path FROM files WHERE seen_gen < ?1")?;
             let stale: Vec<String> = stmt
                 .query_map([gen], |r| r.get(0))?
                 .filter_map(|r| r.ok())
-                .filter(|p: &String| !offline.iter().any(|o| Path::new(p).starts_with(o)))
+                .filter(|p: &String| {
+                    let p = Path::new(p);
+                    !offline.iter().any(|o| p.starts_with(o)) && !crate::config::volume_offline(p)
+                })
                 .collect();
             drop(stmt);
             let mut del = tx.prepare_cached("DELETE FROM files WHERE path = ?1")?;

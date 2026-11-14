@@ -16,7 +16,16 @@ pub struct Config {
     pub min_size: u64,
     /// Also index hidden files and folders (dotfiles). Off by default.
     pub include_hidden: bool,
+    /// Read the words inside documents so search finds what a file says.
+    pub content_search: bool,
+    /// Index external drives under /Volumes too, and remember their files
+    /// while they are unplugged.
+    pub include_external: bool,
+    /// The summon shortcut, in Tauri's accelerator syntax.
+    pub hotkey: String,
 }
+
+pub const DEFAULT_HOTKEY: &str = "Alt+Space";
 
 /// Folder names that only ever hold machine-made files.
 pub const DEFAULT_EXCLUDED_NAMES: &[&str] = &[
@@ -69,6 +78,53 @@ pub const PACKAGE_EXTENSIONS: &[&str] = &[
     "mpkg",
 ];
 
+pub const VOLUMES: &str = "/Volumes";
+
+/// Mounted drives worth indexing: USB disks, SD cards, NAS shares. Skips the
+/// boot volume (a symlink to /), Time Machine backups and installer images.
+pub fn external_volumes(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.starts_with("com.apple") || name == "Recovery" || name == "Preboot" {
+            continue;
+        }
+        if p.join("Backups.backupdb").exists() || p.join(".timemachine").exists() {
+            continue;
+        }
+        // A mounted installer .dmg: a lone app (and maybe a link to /Applications).
+        let installer = std::fs::read_dir(&p)
+            .map(|rd| {
+                rd.flatten().any(|c| c.path().extension().map(|x| x == "app" || x == "pkg").unwrap_or(false))
+            })
+            .unwrap_or(false);
+        if installer {
+            continue;
+        }
+        out.push(p);
+    }
+    out.sort();
+    out
+}
+
+/// A path on an external drive whose drive is not mounted right now.
+pub fn volume_offline(path: &Path) -> bool {
+    volume_root(path).map(|v| !v.is_dir()).unwrap_or(false)
+}
+
+/// "/Volumes/Passport/Movies/a.mp4" → "/Volumes/Passport".
+pub fn volume_root(path: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(VOLUMES).ok()?;
+    let first = rest.components().next()?;
+    Some(Path::new(VOLUMES).join(first.as_os_str()))
+}
+
 /// System locations that are never personal, whatever the roots say.
 pub fn system_paths() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = [
@@ -109,6 +165,9 @@ impl Default for Config {
             excluded_names: DEFAULT_EXCLUDED_NAMES.iter().map(|s| s.to_string()).collect(),
             min_size: 1,
             include_hidden: false,
+            content_search: true,
+            include_external: true,
+            hotkey: DEFAULT_HOTKEY.to_string(),
         }
     }
 }
@@ -138,6 +197,9 @@ impl Config {
     /// Roots with overlaps removed: scanning ~/ and ~/Documents scans ~/ once.
     pub fn effective_roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self.roots.iter().filter(|r| r.is_dir()).cloned().collect();
+        if self.include_external {
+            roots.extend(external_volumes(Path::new(VOLUMES)));
+        }
         roots.sort();
         roots.dedup();
         let mut out: Vec<PathBuf> = Vec::new();

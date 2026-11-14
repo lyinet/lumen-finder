@@ -58,9 +58,13 @@ const ICON = {
   dupes: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
   forgotten: '<svg viewBox="0 0 24 24"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>',
   large: '<svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+  shield: '<svg viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   x: '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  drive: '<svg viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5 13 7.5 5h9L19 13M7 16.5h.01"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
   k: {
     document: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>',
@@ -125,11 +129,16 @@ function render() {
   VIEWS[state.view](v)
 }
 
-function rowHTML(f, terms = [], i = 0) {
-  return `<div class="row" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
+const volName = p => (p.match(/^\/Volumes\/([^/]+)/) || [])[1]
+function rowHTML(f, terms = [], i = 0, extra = '') {
+  const vol = f.offline ? volName(f.path) : null
+  const sub = f.snippet
+    ? `<div class="snip"><b>${T.in_text}</b><span>${highlight(f.snippet, terms)}</span></div>`
+    : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
+  return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
-    <div class="txt"><div class="name">${highlight(f.name, terms)}</div><div class="path"><span>${esc(shortPath(f.parent))}</span></div></div>
-    <div class="size">${bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div></div>`
+    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}</div>${sub}</div>
+    <div class="size">${bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
 }
 
 function bindRows(container, getList) {
@@ -147,7 +156,7 @@ function bindRows(container, getList) {
 // ---- search
 function viewSearch(v) {
   v.append(h(`<div class="searchbar ${state.query ? 'has-q' : ''}">${ICON.search}
-      <input id="q" spellcheck="false" autocomplete="off" placeholder="${T.search_ph}" value="${esc(state.query)}" />
+      <input id="q" spellcheck="false" autocomplete="off" placeholder="${state.snapshot?.config?.content_search === false ? T.search_ph : T.search_ph2}" value="${esc(state.query)}" />
       <span class="meta" id="meta"></span><button class="clear" id="clear">${ICON.x}</button></div>`))
   const chips = h('<div class="chips" id="chips"></div>'); v.append(chips)
   v.append(h(`<div class="toolbar"><span id="count"></span><div class="seg" id="seg"><div class="seg-pill"></div>${
@@ -224,7 +233,7 @@ function renderRows(from) {
   moveSel(false)
 }
 function emptyHTML() {
-  const tips = ['合同', 'kind:pdf 发票', 'in:Downloads >100mb', 'after:2025 视频', 'nzzj', '"meeting notes"']
+  const tips = ['合同', T.tip_content, 'kind:pdf 发票', 'in:Downloads >100mb', 'after:2025 视频', 'nzzj']
   return `<div class="empty"><div><div class="orb"></div><div class="big">${T.empty_title}</div><div>${T.empty_sub}</div>
     <div class="tips">${tips.map(t => `<button>${esc(t)}</button>`).join('')}</div></div></div>`
 }
@@ -294,11 +303,63 @@ async function viewDupes(v) {
   const groups = await api.duplicates()
   if (state.view !== 'dupes') return
   if (!groups.length) { sc.innerHTML = `<div class="empty" style="padding:60px"><div><div class="big">${T.dupes_none}</div></div></div>`; return }
-  const wasted = groups.reduce((a, g) => a + g.wasted, 0)
-  $('#dupe-total').innerHTML = `<span class="btn">${T.dupes_wasted(bytes(wasted))}</span>`
-  sc.innerHTML = groups.map((g, gi) => `<div class="list dupe" style="animation:rowIn .5s var(--ease) ${gi * 60}ms both">
-    <div class="dupe-head"><span>${esc(g.files[0].name)} · ${T.dupes_copies(g.files.length)}</span><b>${T.dupes_wasted(bytes(g.wasted))}</b></div>
-    ${g.files.map((f, i) => rowHTML(f, [], i)).join('')}</div>`).join('')
+  let wasted = groups.reduce((a, g) => a + g.wasted, 0)
+  const keep = groups.map(() => 0)
+  const head = $('#dupe-total')
+  const drawHead = () => {
+    head.innerHTML = wasted > 0 ? `<button class="btn danger" id="dupe-all">${ICON.trash}${T.dupes_trash_all(bytes(wasted))}</button>` : ''
+    const b = $('#dupe-all'); if (b) armed(b, T.dupes_all_confirm, async () => {
+      const paths = [], live = []
+      groups.forEach((g, gi) => { if (g.done) return; live.push(gi); g.files.forEach((f, i) => i !== keep[gi] && paths.push(f.path)) })
+      if (await trash(paths)) live.forEach(gi => settle(gi))
+    })
+  }
+  sc.innerHTML = groups.map((g, gi) => `<div class="list dupe" data-g="${gi}" style="animation:rowIn .5s var(--ease) ${gi * 60}ms both">
+    <div class="dupe-head"><span>${esc(g.files[0].name)} · ${T.dupes_copies(g.files.length)}</span>
+      <span class="dupe-acts"><b>${T.dupes_wasted(bytes(g.wasted))}</b><button class="btn small danger" data-trash="${gi}">${ICON.trash}${T.dupes_trash(g.files.length - 1)}</button></span></div>
+    ${g.files.map((f, i) => rowHTML(f, [], i, `<button class="keep ${i === 0 ? 'on' : ''}" data-keep="${i}" title="${T.dupes_kept}">${ICON.check}<span>${T.dupes_keep}</span></button>`)).join('')}</div>`).join('')
+  sc.querySelectorAll('.dupe').forEach(el => {
+    const gi = Number(el.dataset.g)
+    el.addEventListener('click', e => {
+      const k = e.target.closest('[data-keep]'); if (!k) return
+      e.stopPropagation(); keep[gi] = Number(k.dataset.keep)
+      el.querySelectorAll('[data-keep]').forEach(b => b.classList.toggle('on', b === k))
+      el.querySelectorAll('.row').forEach((r, i) => r.classList.toggle('kept', i === keep[gi]))
+    })
+    el.querySelectorAll('.row')[0]?.classList.add('kept')
+    armed($('[data-trash]', el), T.dupes_confirm, async () => {
+      const g = groups[gi]
+      if (await trash(g.files.filter((_, i) => i !== keep[gi]).map(f => f.path))) settle(gi)
+    })
+  })
+  drawHead()
+  function settle(gi) {
+    const g = groups[gi]; if (g.done) return
+    g.done = true; wasted -= g.wasted
+    const el = $(`.dupe[data-g="${gi}"]`, sc)
+    el.querySelectorAll('.row:not(.kept)').forEach(r => r.classList.add('gone'))
+    $('.dupe-acts', el).innerHTML = `<b class="ok">${ICON.check}${T.dupes_kept}</b>`
+    setTimeout(() => el.classList.add('done'), 700)
+    drawHead()
+  }
+}
+
+/** A destructive button that needs a second click within 3 s. */
+function armed(btn, confirmText, run) {
+  const label = btn.innerHTML; let t
+  btn.onclick = async e => {
+    e.stopPropagation()
+    if (!btn.classList.contains('armed')) {
+      btn.classList.add('armed'); btn.innerHTML = `${ICON.trash}${confirmText}`
+      t = setTimeout(() => { btn.classList.remove('armed'); btn.innerHTML = label }, 3000); return
+    }
+    clearTimeout(t); btn.disabled = true; await run()
+  }
+}
+async function trash(paths) {
+  if (!paths.length) return true
+  try { const r = await api.trash(paths); toast(T.trashed(r.count, bytes(r.bytes))); refreshSnapshot(); return true }
+  catch { toast(T.trash_fail); return false }
 }
 
 // ---- settings
@@ -318,9 +379,52 @@ async function viewSettings(v) {
   }
   form.append(pathList(T.set_roots, T.set_roots_p, [...snap.config.roots], T.set_add, items => api.setRoots(items).then(scanStarted)))
   form.append(pathList(T.set_excl, T.set_excl_p, [...snap.config.excluded_paths], T.set_add_excl, items => api.setExcluded(items).then(scanStarted)))
-  const rescan = h(`<div class="field"><h3>${T.set_hotkey}</h3><p>${T.set_hotkey_p}</p></div>`); form.append(rescan)
+  if (!snap.fullDiskAccess) form.prepend(fdaCard())
+  const feats = h(`<div class="field"><h3>${T.set_features}</h3>
+    ${toggleRow('content', T.set_content, T.set_content_p, snap.config.content_search !== false)}
+    ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
+  form.append(feats)
+  feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
+    const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
+    const cfg = await api.setOptions(sw.dataset.k === 'content' ? { contentSearch: on } : { includeExternal: on })
+    state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
+  })
+  const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>
+    <button class="hotkey" id="hk">${keycaps(snap.config.hotkey || 'Alt+Space')}</button></div>`)
+  form.append(hk)
+  recordHotkey($('#hk', hk))
   form.append(h(`<div class="field"><h3>${T.set_privacy}</h3><p>${T.set_privacy_p}</p><button class="btn primary" id="set-rescan">${T.set_rescan}</button></div>`))
   $('#set-rescan').onclick = () => api.startScan().then(scanStarted)
+}
+
+function toggleRow(k, title, p, on) {
+  return `<div class="toggle"><div><b>${title}</b><p>${p}</p></div><button class="switch ${on ? 'on' : ''}" data-k="${k}"><i></i></button></div>`
+}
+function fdaCard() {
+  const c = h(`<div class="field fda"><div class="fda-icon">${ICON.shield}</div><div><h3>${T.fda_title}</h3><p>${T.fda_p}</p>
+    <button class="btn primary">${T.fda_btn}</button></div></div>`)
+  $('.btn', c).onclick = () => api.openFdaSettings()
+  return c
+}
+const KEYNAMES = { Alt: '⌥', Option: '⌥', Cmd: '⌘', Command: '⌘', CmdOrCtrl: '⌘', Super: '⌘', Ctrl: '⌃', Control: '⌃', Shift: '⇧', Space: 'Space' }
+const keycaps = acc => acc.split('+').map(k => `<kbd>${KEYNAMES[k] || k.replace(/^Key/, '')}</kbd>`).join('')
+function recordHotkey(btn) {
+  btn.onclick = () => {
+    btn.classList.add('rec'); btn.innerHTML = `<span>${T.set_hotkey_rec}</span>`
+    const onKey = async e => {
+      e.preventDefault(); e.stopPropagation()
+      if (e.key === 'Escape') return done(state.snapshot.config.hotkey)
+      if (['Meta', 'Alt', 'Control', 'Shift'].includes(e.key)) return
+      const mods = [e.metaKey && 'Cmd', e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift'].filter(Boolean)
+      if (!mods.length) return
+      const code = e.code.replace(/^Key/, '').replace(/^Digit/, '')
+      const acc = [...mods, code].join('+')
+      try { const cfg = await api.setHotkey(acc); state.snapshot.config = { ...state.snapshot.config, ...cfg }; toast(T.set_hotkey_ok(acc.replace(/\+/g, ' '))); done(acc) }
+      catch { toast(T.set_hotkey_taken); btn.classList.add('shake'); setTimeout(() => btn.classList.remove('shake'), 500); done(state.snapshot.config.hotkey) }
+    }
+    const done = acc => { removeEventListener('keydown', onKey, true); btn.classList.remove('rec'); btn.innerHTML = keycaps(acc || 'Alt+Space') }
+    addEventListener('keydown', onKey, true)
+  }
 }
 
 // ------------------------------------------------------------ actions ----
@@ -382,9 +486,10 @@ function setLive(snap) {
   $('#rescan').classList.toggle('spin', state.scanning)
   tween($('#live-count'), snap?.status?.files ?? 0, { format: n => T.files(fmt(n)) })
   $('#live-sub').textContent = state.scanning ? T.live_scanning
+    : state.reading ? T.live_reading(fmt(state.reading.done), fmt(state.reading.total))
     : snap?.status?.last_scan_at ? `${T.live_watching} · ${ago(snap.status.last_scan_at)}` : T.live_watching
 }
-async function refreshSnapshot() { const s = await api.snapshot(); state.snapshot = s; state.home = s.home; state.scanning = s.scanning; setLive(s); return s }
+async function refreshSnapshot() { const s = await api.snapshot(); state.snapshot = s; state.home = s.home; state.scanning = s.scanning; if (!s.reading) state.reading = null; setLive(s); return s }
 function scanStarted() { state.scanning = true; setLive(state.snapshot) }
 
 // ------------------------------------------------------------ stage ------
@@ -399,10 +504,12 @@ function onboarding() {
   const el = h(`<div class="wrap"><div class="hero-orb"><div class="ring"></div><div class="ring"></div><div class="core"></div></div>
     <h1>${T.ob_title}</h1><p class="lede">${T.ob_lede}</p>
     <div class="scope">${yes}${no}</div>
+    ${state.snapshot && !state.snapshot.fullDiskAccess ? `<button class="fda-pill" id="ob-fda">${ICON.shield}<span>${T.fda_title}</span></button>` : ''}
     <button class="btn primary big" id="ob-go">${T.ob_start}</button>
     <p class="fine">${T.ob_fine} · <a id="ob-choose">${T.ob_choose}</a></p></div>`)
   showStage(el)
   $('#ob-go').onclick = () => startFirstScan()
+  const fda = $('#ob-fda'); if (fda) fda.onclick = () => api.openFdaSettings()
   $('#ob-choose').onclick = async () => { const p = await api.pickFolder(); if (p) { await api.setRoots([p]); scanningStage() } }
 }
 async function startFirstScan() { scanningStage(); await api.startScan() }
@@ -497,6 +604,16 @@ async function boot() {
   await api.on('scan://done', onDone)
   await api.on('scan://error', e => { state.scanning = false; toast(String(e)) })
   await api.on('index://changed', async b => { toast(T.toast_changed(b.upserted, b.removed)); await refreshSnapshot(); if (state.view === 'search') runSearch(true) })
+  await api.on('content://progress', p => {
+    state.reading = p.finished ? null : p
+    const live = $('#live'); live.classList.toggle('scanning', !!state.reading || state.scanning)
+    if (!state.scanning) $('#live-sub').textContent = state.reading ? T.live_reading(fmt(p.done), fmt(p.total)) : T.live_watching
+  })
+  await api.on('content://done', async r => {
+    state.reading = null; const s = await refreshSnapshot()
+    if (r.read > 20) toast(T.content_done(fmt(s.status.content_files ?? r.with_text)))
+    if (state.view === 'search' && state.query) runSearch(true)
+  })
   await api.on('app://summon', () => { if (state.view !== 'search') go('search'); setTimeout(() => $('#q')?.select(), 30) })
   const snap = await refreshSnapshot()
   if (snap.firstRun) onboarding()
