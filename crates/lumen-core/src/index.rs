@@ -80,6 +80,20 @@ END;
 CREATE TRIGGER IF NOT EXISTS files_ad_content AFTER DELETE ON files BEGIN
     DELETE FROM content WHERE id = old.id;
 END;
+
+-- v0.6: one sentence vector per file for semantic search (see semantic.rs).
+-- size/mtime say which version of the file it describes; an empty vec means
+-- the model had nothing for it.
+CREATE TABLE IF NOT EXISTS vectors (
+    id    INTEGER PRIMARY KEY,
+    mtime INTEGER NOT NULL,
+    size  INTEGER NOT NULL,
+    model INTEGER NOT NULL,
+    vec   BLOB NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS files_ad_vectors AFTER DELETE ON files BEGIN
+    DELETE FROM vectors WHERE id = old.id;
+END;
 "#;
 
 pub(crate) const UPSERT: &str = r#"
@@ -226,7 +240,7 @@ impl Index {
         if version != 0 && version != SCHEMA_VERSION && version != 1 && version != 2 {
             // Future migrations go here. The index is a cache of the disk, so
             // the safe fallback is always "drop and rescan".
-            conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
+            conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
         }
         conn.execute_batch(SCHEMA).context("creating schema")?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

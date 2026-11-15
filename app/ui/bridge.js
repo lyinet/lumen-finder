@@ -12,6 +12,7 @@ function realBridge() {
   return {
     snapshot: () => invoke('snapshot'),
     search: req => invoke('search', { req }),
+    semantic: req => invoke('semantic', { req }),
     overview: () => invoke('overview'),
     recent: limit => invoke('recent', { limit }),
     largest: limit => invoke('largest', { limit }),
@@ -95,10 +96,18 @@ function mockBridge() {
     const parent = '/Volumes/Passport/归档'
     files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 2.4e9, mtime: now - 86400 * 400, offline: true })
   }
+  // A few files that only match by meaning, for the v0.6 preview.
+  for (const [name, kind, ext, folder, days] of [
+    ['IMG_4471 札幌雪祭', 'image', 'heic', 'Pictures/导出', 330], ['DJI_0032', 'video', 'mp4', 'Movies/旅行/2025-01', 320],
+    ['niseko-powder-day1', 'video', 'mov', 'Movies/旅行/2025-01', 322], ['小樽运河夜景', 'image', 'jpg', 'Pictures/导出', 318],
+    ['冬季行程-最终版', 'document', 'pages', 'Documents/个人', 360], ['ski-rental-receipt', 'pdf', 'pdf', 'Downloads', 321]]) {
+    const parent = `${HOME}/${folder}`
+    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: kind === 'video' ? 1.8e9 : kind === 'image' ? 5.2e6 : 2.1e5, mtime: now - 86400 * days })
+  }
   let scanned = !location.hash.includes('first')
   const listeners = {}
   const COLS = [['invoices', /发票|invoice|收据/i], ['contracts', /合同|协议|contract/i], ['ids', /证件|护照|passport|身份证/i], ['screenshots', /^(Screenshot|截屏)/], ['resumes', /简历|resume/i]]
-  const opts = { content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto' }
+  const opts = { content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto', semantic: true }
   const emit = (e, p) => (listeners[e] || []).forEach(cb => cb(p))
   const ALIAS = { 文档: 'document', 音乐: 'audio', 视频: 'video', 图片: 'image', 照片: 'image', music: 'audio', doc: 'document', photo: 'image' }
 
@@ -130,11 +139,37 @@ function mockBridge() {
     return { hits: page, total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
   }
 
+  // Stand-in for Apple's sentence model: concepts several words point to.
+  const CONCEPTS = [
+    [/雪|snow|ski|powder|niseko|滑雪|冬/i, 1], [/北海道|札幌|小樽|hokkaido|niseko|日本|京都|japan/i, 1], [/视频|影片|video|录屏|mov|mp4|dji/i, .6],
+    [/旅行|行程|trip|travel|movies\/旅行/i, .7], [/合同|协议|contract|lease|租/i, 1], [/报价|quote|发票|invoice|收据|receipt/i, .9],
+    [/照片|photo|全家福|img|pictures/i, .6], [/毕业|graduation|答辩/i, 1], [/预算|budget|开销|money/i, 1], [/路演|融资|pitch|deck/i, 1],
+  ]
+  const DATES = { 2025: /DJI_0032|niseko|小樽|札幌|ski-rental/, 去年: /DJI_0032|niseko|小樽|札幌|ski-rental|冬季/ }
+  const vec = t => CONCEPTS.map(([re, w]) => re.test(t) ? w : 0)
+  function semantic(req) {
+    const t0 = performance.now(), qv = vec(req.query)
+    const qn = Math.hypot(...qv) || 1
+    const hits = []
+    for (const f of files) {
+      const text = `${f.name} ${f.parent} ${f.kind} ${f.ext}`
+      const v = vec(text), n = Math.hypot(...v)
+      if (!n) continue
+      let s = v.reduce((a, x, i) => a + x * qv[i], 0) / (n * qn)
+      for (const [w, re] of Object.entries(DATES)) if (req.query.includes(w) && re.test(f.name)) s += .08
+      if (s > .45 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, score: Math.min(.97, s * .93) })
+    }
+    hits.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
+    return { hits: hits.slice(0, req.limit || 40), indexed: files.length, took_us: Math.round((performance.now() - t0) * 1000) + 9000 }
+  }
+
   return {
+    semantic: async req => semantic(req),
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.5.0',
+      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.6.0',
+      semanticReady: true, semanticFiles: files.length,
     }),
     search: async req => query(req),
     overview: async () => {
@@ -177,7 +212,7 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
@@ -195,7 +230,7 @@ function mockBridge() {
       return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
-    checkUpdate: async () => location.hash.includes('update') ? { version: '0.5.1', current: '0.5.0', notes: '' } : null,
+    checkUpdate: async () => location.hash.includes('update') ? { version: '0.6.1', current: '0.6.0', notes: '' } : null,
     installUpdate: async () => { for (let p = 0; p <= 1; p += 0.1) { emit('update-progress', p); await new Promise(r => setTimeout(r, 120)) } },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },

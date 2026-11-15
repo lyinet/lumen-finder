@@ -31,7 +31,9 @@ const state = {
   view: 'search', home: '', snapshot: null, scanning: false,
   query: '', kinds: new Set(), sort: 'relevance',
   hits: [], total: 0, counts: {}, took: 0, sel: 0, offset: 0, more: false, seq: 0,
+  semantic: false, learning: null,
 }
+const semReady = () => !!state.snapshot?.semanticReady
 
 // ------------------------------------------------------------ nav --------
 const NAV = [
@@ -75,7 +77,7 @@ function go(view) {
 // ------------------------------------------------------------ views ------
 const VIEWS = { timeline: viewTimeline, collections: viewCollections, search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
 function render() {
-  const v = $('#view'); v.innerHTML = ''; v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter')
+  const v = $('#view'); v.innerHTML = ''; v.classList.remove('view-enter', 'semantic'); void v.offsetWidth; v.classList.add('view-enter')
   VIEWS[state.view](v)
 }
 
@@ -87,7 +89,7 @@ function rowHTML(f, terms = [], i = 0, extra = '') {
     : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
   return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
-    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}</div>${sub}</div>
+    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
     <div class="size">${bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
 }
 
@@ -104,10 +106,14 @@ function bindRows(container, getList) {
 }
 
 // ---- search
+const SPARK = '<svg viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>'
+const searchPh = () => state.semantic ? T.sem_ph : state.snapshot?.config?.content_search === false ? T.search_ph : T.search_ph2
 function viewSearch(v) {
-  v.append(h(`<div class="searchbar ${state.query ? 'has-q' : ''}">${ICON.search}
-      <input id="q" spellcheck="false" autocomplete="off" placeholder="${state.snapshot?.config?.content_search === false ? T.search_ph : T.search_ph2}" value="${esc(state.query)}" />
-      <span class="meta" id="meta"></span><button class="clear" id="clear">${ICON.x}</button></div>`))
+  v.classList.toggle('semantic', state.semantic)
+  v.append(h(`<div class="searchbar ${state.query ? 'has-q' : ''}">${state.semantic ? SPARK : ICON.search}
+      <input id="q" spellcheck="false" autocomplete="off" placeholder="${esc(searchPh())}" value="${esc(state.query)}" />
+      <span class="meta" id="meta"></span><button class="clear" id="clear">${ICON.x}</button>
+      ${semReady() ? `<button class="sem ${state.semantic ? 'on' : ''}" id="sem" title="⌘J">${SPARK}<span>${T.sem_btn}</span></button>` : ''}</div>`))
   const chips = h('<div class="chips" id="chips"></div>'); v.append(chips)
   v.append(h(`<div class="toolbar"><span id="count"></span><div class="seg" id="seg"><div class="seg-pill"></div>${
     Object.entries(T.sort).map(([k, l]) => `<button data-s="${k}">${l}</button>`).join('')}</div></div>`))
@@ -121,10 +127,15 @@ function viewSearch(v) {
     clearTimeout(deb); deb = setTimeout(() => runSearch(true), 60)
   })
   $('#clear').onclick = () => { q.value = ''; state.query = ''; $('.searchbar').classList.remove('has-q'); runSearch(true); q.focus() }
+  const sem = $('#sem'); if (sem) sem.onclick = () => toggleSemantic()
   $('#seg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; state.sort = b.dataset.s; moveSeg(); runSearch(true) })
   res.addEventListener('scroll', () => { if (state.more && res.scrollTop + res.clientHeight > res.scrollHeight - 300) loadMore() })
   bindRows(res)
   renderChips(); moveSeg(); runSearch(true)
+}
+function toggleSemantic(on = !state.semantic) {
+  if (on && !semReady()) { toast(T.sem_unavailable); return }
+  state.semantic = on; state.kinds.clear(); render()
 }
 function moveSeg() {
   const seg = $('#seg'); if (!seg) return
@@ -158,6 +169,18 @@ function renderChips() {
 async function runSearch(reset) {
   const seq = ++state.seq
   if (reset) { state.offset = 0; state.sel = 0 }
+  if (state.semantic) {
+    if (!reset) return
+    const q = state.query.trim()
+    const res = q ? await api.semantic({ query: q, kinds: [...state.kinds], limit: 60 }) : { hits: [], took_us: 0 }
+    if (seq !== state.seq || state.view !== 'search') return
+    // Counts per kind from an unfiltered pass, so the chips stay useful.
+    const all = q && state.kinds.size ? await api.semantic({ query: q, kinds: [], limit: 60 }) : res
+    if (seq !== state.seq || state.view !== 'search') return
+    state.counts = {}; all.hits.forEach(f => state.counts[f.kind] = (state.counts[f.kind] || 0) + 1)
+    state.hits = res.hits; state.total = res.hits.length; state.took = res.took_us; state.more = false
+    renderChips(); renderRows(0); return
+  }
   const res = await api.search({ query: state.query, kinds: [...state.kinds], sort: state.sort, limit: 80, offset: state.offset })
   if (seq !== state.seq || state.view !== 'search') return
   state.counts = res.kind_counts; state.total = res.total; state.took = res.took_us
@@ -168,15 +191,25 @@ async function runSearch(reset) {
 async function loadMore() { if (state.loading) return; state.loading = true; state.offset = state.hits.length; await runSearch(false); state.loading = false }
 
 function renderRows(from) {
-  const rows = $('#rows'), terms = state.query.trim().split(/\s+/)
-  $('#meta').textContent = state.query || state.kinds.size ? T.matches(fmt(state.total), (state.took / 1000).toFixed(1)) : ''
+  const rows = $('#rows'), terms = state.semantic ? [] : state.query.trim().split(/\s+/)
+  $('#meta').textContent = state.semantic
+    ? (state.learning ? T.sem_learning(fmt(state.learning.done), fmt(state.learning.total)) : state.query ? T.sem_matches(fmt(state.total), (state.took / 1000).toFixed(1)) : '')
+    : state.query || state.kinds.size ? T.matches(fmt(state.total), (state.took / 1000).toFixed(1)) : ''
   $('#count').textContent = T.files(fmt(state.total))
   if (from === 0) rows.innerHTML = ''
   if (!state.hits.length) {
-    rows.innerHTML = state.query || state.kinds.size
-      ? `<div class="empty"><div><div class="orb" style="opacity:.4"></div><div class="big">${T.no_results}</div><div>${T.no_results_sub}</div></div></div>`
+    const tryMeaning = !state.semantic && state.query.trim() && semReady()
+      ? `<div class="tips"><button class="sem-try">${SPARK}${esc(T.sem_try(state.query.trim()))}</button></div>` : ''
+    rows.innerHTML = state.semantic
+      ? (state.query.trim()
+        ? `<div class="empty"><div><div class="orb sem" style="opacity:.4"></div><div class="big">${T.sem_none}</div><div>${T.sem_none_sub}</div></div></div>`
+        : `<div class="empty"><div><div class="orb sem"></div><div class="big">${T.sem_empty_title}</div><div>${T.sem_empty_sub}</div>
+            <div class="tips">${T.sem_tips.map(t => `<button>${esc(t)}</button>`).join('')}</div></div></div>`)
+      : state.query || state.kinds.size
+      ? `<div class="empty"><div><div class="orb" style="opacity:.4"></div><div class="big">${T.no_results}</div><div>${T.no_results_sub}</div>${tryMeaning}</div></div>`
       : emptyHTML()
-    rows.querySelectorAll('.tips button').forEach(b => b.onclick = () => { const q = $('#q'); q.value = b.textContent; q.dispatchEvent(new Event('input')) })
+    rows.querySelectorAll('.tips button:not(.sem-try)').forEach(b => b.onclick = () => { const q = $('#q'); q.value = b.textContent; q.dispatchEvent(new Event('input')) })
+    const st = $('.sem-try', rows); if (st) st.onclick = () => toggleSemantic(true)
     $('#sel').style.opacity = 0; return
   }
   rows.insertAdjacentHTML('beforeend', state.hits.slice(from).map((f, i) => rowHTML(f, terms, from + i)).join(''))
@@ -466,6 +499,7 @@ async function viewSettings(v) {
   const feats = h(`<div class="field"><h3>${T.set_features}</h3>
     ${toggleRow('content', T.set_content, T.set_content_p, snap.config.content_search !== false)}
     ${toggleRow('ocr', T.set_ocr, T.set_ocr_p, snap.config.ocr !== false)}
+    ${toggleRow('semantic', T.set_semantic, T.set_semantic_p, snap.config.semantic !== false)}
     ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
   form.append(feats)
   const gen = h(`<div class="field"><h3>${T.set_general}</h3>
@@ -486,7 +520,7 @@ async function viewSettings(v) {
   })
   feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, external: { includeExternal: on } }[sw.dataset.k])
+    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, external: { includeExternal: on } }[sw.dataset.k])
     state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
   })
   const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>
@@ -740,6 +774,13 @@ async function boot() {
     if (r.read > 20) toast(T.content_done(fmt(s.status.content_files ?? r.with_text)))
     if (state.view === 'search' && state.query) runSearch(true)
   })
+  await api.on('semantic://progress', p => {
+    state.learning = p.finished || !p.total ? null : p
+    if (state.view === 'search' && state.semantic && $('#meta') && state.learning) $('#meta').textContent = T.sem_learning(fmt(p.done), fmt(p.total))
+  })
+  await api.on('semantic://done', async () => { state.learning = null; await refreshSnapshot(); if (state.view === 'search' && state.semantic) runSearch(true) })
+  // ⌘J flips between keyword and meaning search.
+  addEventListener('keydown', e => { if (e.metaKey && e.key.toLowerCase() === 'j' && state.view === 'search') { e.preventDefault(); toggleSemantic() } })
   await api.on('app://summon', () => { if (state.view !== 'search') go('search'); setTimeout(() => $('#q')?.select(), 30) })
   // "See all in Lumen" from the quick panel.
   await api.on('app://query', q => { state.query = q; state.kinds.clear(); state.view = 'search'; movePill(); render(); setTimeout(() => $('#q')?.focus(), 30) })
@@ -755,5 +796,6 @@ async function boot() {
   if (!isApp && hash === 'scan') startFirstScan()
   if (!isApp && VIEWS[hash]) go(hash)
   if (!isApp && hash.startsWith('q=')) { state.query = decodeURIComponent(hash.slice(2)); render() }
+  if (!isApp && hash.startsWith('ask')) { state.semantic = true; state.query = decodeURIComponent(hash.slice(4)); render() }
 }
 boot()

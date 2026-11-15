@@ -7,8 +7,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use lumen_core::{
-    index_content, scan, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Kind, MonthStat, Overview,
-    SearchRequest, SearchResponse, Watcher,
+    index_content, index_semantic, scan, semantic_search, set_embed_helper, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Kind, MonthStat, Overview,
+    SearchRequest, SearchResponse, SemanticRequest, SemanticResponse, Watcher,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ struct AppState {
     watcher: Mutex<Option<Watcher>>,
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    embedding: Arc<AtomicBool>,
 }
 
 type Res<T> = Result<T, String>;
@@ -52,6 +53,10 @@ struct Snapshot {
     /// asks separately and some (Mail downloads, iCloud) stay hidden.
     full_disk_access: bool,
     version: String,
+    /// Semantic search can run here (helper present and switched on).
+    semantic_ready: bool,
+    /// Files with a vector.
+    semantic_files: i64,
 }
 
 #[tauri::command]
@@ -66,6 +71,8 @@ fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
         reading: state.reading.load(Ordering::Relaxed),
         full_disk_access: has_full_disk_access(),
         version: app.package_info().version.to_string(),
+        semantic_ready: lumen_core::semantic::available(),
+        semantic_files: lumen_core::semantic::semantic_count(&state.index).unwrap_or(0),
     })
 }
 
@@ -76,6 +83,16 @@ fn lumen_home() -> String {
 #[tauri::command]
 fn search(state: State<AppState>, req: SearchRequest) -> Res<SearchResponse> {
     state.index.search(&req).map_err(err)
+}
+
+/// Find files by what they are about (v0.6 beta).
+#[tauri::command]
+async fn semantic(state: State<'_, AppState>, req: SemanticRequest) -> Res<SemanticResponse> {
+    let index = state.index.clone();
+    tauri::async_runtime::spawn_blocking(move || semantic_search(&index, &req))
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -126,6 +143,7 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
         .name("lumen-scan".into())
         .spawn(move || {
             let emitter = app.clone();
+            let cancel_sem = cancel.clone();
             let result = scan(&index, &cfg, cancel, |p| {
                 let _ = emitter.emit("scan://progress", p);
             });
@@ -136,6 +154,8 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
                     restart_watcher(&app);
                     if !report.cancelled && cfg.content_search {
                         run_content(&app);
+                    } else if !report.cancelled {
+                        run_semantic(&app, cancel_sem);
                     }
                 }
                 Err(e) => {
@@ -170,7 +190,7 @@ fn run_content(app: &AppHandle) {
     let app = app.clone();
     let _ = std::thread::Builder::new().name("lumen-content".into()).spawn(move || {
         let emitter = app.clone();
-        let r = index_content(&index, cancel, |p| {
+        let r = index_content(&index, cancel.clone(), |p| {
             let _ = emitter.emit("content://progress", p);
         });
         reading.store(false, Ordering::SeqCst);
@@ -180,7 +200,33 @@ fn run_content(app: &AppHandle) {
             }
             Err(e) => log::warn!("content indexing failed: {e}"),
         }
+        // Vectors use the first lines of each file's text, so they come after.
+        if !cancel.load(Ordering::Relaxed) {
+            run_semantic(&app, cancel);
+        }
     });
+}
+
+/// Embed new and changed files for semantic search, on the content thread.
+fn run_semantic(app: &AppHandle, cancel: Arc<AtomicBool>) {
+    if !lumen_core::semantic::available() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if state.embedding.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let emitter = app.clone();
+    let r = index_semantic(&state.index, cancel, |p| {
+        let _ = emitter.emit("semantic://progress", p);
+    });
+    state.embedding.store(false, Ordering::SeqCst);
+    match r {
+        Ok(report) => {
+            let _ = app.emit("semantic://done", &report);
+        }
+        Err(e) => log::warn!("semantic indexing failed: {e}"),
+    }
 }
 
 fn restart_watcher(app: &AppHandle) {
@@ -310,6 +356,12 @@ fn use_ocr(on: bool) {
     set_ocr_helper(if on { helper } else { None });
 }
 
+/// The same helper embeds sentences (NaturalLanguage) for semantic search.
+fn use_semantic(on: bool) {
+    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("lumen-ocr")));
+    set_embed_helper(if on { helper } else { None });
+}
+
 /// Content search and external drives on or off.
 #[tauri::command]
 fn set_options(
@@ -322,6 +374,7 @@ fn set_options(
     launch_at_login: Option<bool>,
     theme: Option<String>,
     auto_update: Option<bool>,
+    semantic: Option<bool>,
 ) -> Res<Config> {
     if let Some(on) = launch_at_login {
         let al = app.autolaunch();
@@ -351,6 +404,13 @@ fn set_options(
         if let Some(v) = auto_update {
             cfg.auto_update = v;
         }
+        if let Some(v) = semantic {
+            cfg.semantic = v;
+            use_semantic(v);
+            if !v {
+                let _ = lumen_core::semantic::clear_vectors(&state.index);
+            }
+        }
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
@@ -358,7 +418,7 @@ fn set_options(
         apply_theme(&app, &cfg.theme);
     }
     // Only the options that change what is indexed need a scan.
-    if content_search.is_some() || include_external.is_some() || ocr.is_some() {
+    if content_search.is_some() || include_external.is_some() || ocr.is_some() || semantic == Some(true) {
         run_scan(&app, &state)?;
     }
     Ok(cfg)
@@ -629,6 +689,7 @@ fn main() {
             let config_path = data.join("config.json");
             let config = Config::load(&config_path);
             use_ocr(config.ocr);
+            use_semantic(config.semantic);
             let index = Arc::new(Index::open(data.join("index.db"))?);
             let had_index = index.status().map(|s| s.generation > 0).unwrap_or(false);
 
@@ -641,6 +702,7 @@ fn main() {
                 watcher: Mutex::new(None),
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
+                embedding: Arc::new(AtomicBool::new(false)),
             });
 
             let hotkey = app.state::<AppState>().config.lock().unwrap().hotkey.clone();
@@ -703,6 +765,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             search,
+            semantic,
             overview,
             recent,
             largest,

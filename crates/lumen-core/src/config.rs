@@ -33,6 +33,9 @@ pub struct Config {
     pub theme: String,
     /// Look for a new version on GitHub Releases shortly after launch.
     pub auto_update: bool,
+    /// Semantic search (v0.6, beta): embed every file on device so it can be
+    /// found by what it is about.
+    pub semantic: bool,
 }
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -183,6 +186,7 @@ impl Default for Config {
             launch_at_login: false,
             theme: "auto".to_string(),
             auto_update: true,
+            semantic: true,
         }
     }
 }

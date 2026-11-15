@@ -273,3 +273,63 @@ fn timeline_by_month() {
     assert!(index.month("2023-06", Some(Kind::Image), 50, 0).unwrap().is_empty());
     assert!(index.month("2023-06'--", None, 50, 0).unwrap().is_empty());
 }
+
+/// Stand-in for Apple's sentence model: a few concepts that several words in
+/// either language point to, so "北海道的雪景" lands near "hokkaido snow".
+struct ConceptEmbedder;
+
+impl Embedder for ConceptEmbedder {
+    fn embed(&self, items: &[(semantic::Model, String)]) -> anyhow::Result<Vec<Option<Vec<f32>>>> {
+        const CONCEPTS: &[&[&str]] = &[
+            &["雪", "snow", "ski"],
+            &["北海道", "hokkaido", "japan", "日本"],
+            &["合同", "协议", "contract", "lease"],
+            &["预算", "budget", "money", "开销"],
+            &["旅行", "trip", "travel"],
+        ];
+        Ok(items
+            .iter()
+            .map(|(_, t)| {
+                let t = t.to_lowercase();
+                let mut v: Vec<f32> = CONCEPTS
+                    .iter()
+                    .map(|ws| ws.iter().filter(|w| t.contains(*w)).count() as f32)
+                    .collect();
+                v.extend([0.05; 4]);
+                (!t.trim().is_empty()).then_some(v)
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn semantic_search_finds_by_meaning() {
+    let _g = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("Movies/hokkaido-snow-day.mov"), b"mov");
+    touch(&home.join("Documents/租房协议.pdf"), b"pdf");
+    touch(&home.join("Documents/family budget 2025.xlsx"), b"xlsx");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home], content_search: false, ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+
+    set_embedder(Some(Arc::new(ConceptEmbedder)));
+    let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(r.embedded, 3);
+    // Nothing left to do on a second pass.
+    assert_eq!(index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap().embedded, 0);
+
+    let top = |q: &str| {
+        let r = semantic_search(&index, &SemanticRequest { query: q.into(), ..Default::default() }).unwrap();
+        assert_eq!(r.indexed, 3);
+        r.hits.first().map(|h| h.file.name.clone())
+    };
+    assert_eq!(top("北海道的雪景视频").as_deref(), Some("hokkaido-snow-day.mov"));
+    assert_eq!(top("lease contract").as_deref(), Some("租房协议.pdf"));
+    assert_eq!(top("我们家的开销").as_deref(), Some("family budget 2025.xlsx"));
+    // Kind filter.
+    let r = semantic_search(&index, &SemanticRequest { query: "snow".into(), kinds: vec![Kind::Pdf], limit: 5 }).unwrap();
+    assert!(r.hits.is_empty());
+    set_embedder(None);
+}

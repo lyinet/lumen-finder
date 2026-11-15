@@ -3,6 +3,8 @@
 //!   lumen scan [ROOT…]          full or incremental scan
 //!   lumen search QUERY…         search (supports kind:, ext:, in:, >10mb, after:…)
 //!   lumen content               read the words inside documents (正文搜索)
+//!   lumen ask QUERY…            semantic search: find files by what they are about
+//!                               (macOS; uses the helper inside Lumen.app)
 //!   lumen stats                 totals by kind, scattered folders
 //!   lumen dupes                 likely duplicate files
 //!   lumen --db PATH …           use another index file
@@ -20,6 +22,7 @@ fn main() -> Result<()> {
     let db = take_opt(&mut args, "--db").map(PathBuf::from).unwrap_or_else(default_db);
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
     let index = Index::open(&db)?;
+    set_embed_helper(Some(helper_path()));
 
     match cmd.as_str() {
         "scan" => {
@@ -66,6 +69,26 @@ fn main() -> Result<()> {
                 println!("— {} matches in {:.1} ms", r.total, r.took_us as f64 / 1000.0);
             }
         }
+        "ask" => {
+            anyhow::ensure!(lumen_core::semantic::available(), "semantic search needs Lumen.app (set LUMEN_HELPER to lumen-ocr)");
+            let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
+                if !json && !p.finished && p.total > 0 {
+                    eprint!("\r\x1b[2K  learning {}/{} files", p.done, p.total);
+                }
+            })?;
+            if !json && r.embedded > 0 {
+                eprintln!();
+            }
+            let r = semantic_search(&index, &SemanticRequest { query: args.join(" "), limit: 20, ..Default::default() })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                for h in &r.hits {
+                    println!("{:>4.0}%  {:<12} {}", h.score * 100.0, h.file.kind.slug(), h.file.path);
+                }
+                println!("— {} matches in {:.1} ms", r.hits.len(), r.took_us as f64 / 1000.0);
+            }
+        }
         "stats" => {
             let ov = index.overview()?;
             if json {
@@ -92,7 +115,7 @@ fn main() -> Result<()> {
             }
         }
         _ => {
-            println!("lumen scan [ROOT…] | content | search QUERY | stats | dupes   [--db PATH] [--json]");
+            println!("lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json]");
         }
     }
     Ok(())
@@ -133,6 +156,13 @@ fn default_db() -> PathBuf {
 }
 fn config_path() -> PathBuf {
     data_dir().join("config.json")
+}
+
+/// The embedding helper: $LUMEN_HELPER, else the one inside Lumen.app.
+fn helper_path() -> PathBuf {
+    std::env::var_os("LUMEN_HELPER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Applications/Lumen.app/Contents/MacOS/lumen-ocr"))
 }
 
 fn human(b: i64) -> String {

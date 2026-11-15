@@ -1,6 +1,10 @@
-// lumen-ocr: print the text Apple Vision reads in an image or a scanned PDF.
+// lumen-ocr: print the text Apple Vision reads in an image or a scanned PDF,
+// and (since v0.6) turn sentences into vectors for semantic search.
 //
 //   lumen-ocr <file>          text on stdout, nothing when there is none
+//   lumen-ocr embed           stdin: one "zh\t<text>" or "en\t<text>" per line
+//                             stdout: one line each, the sentence vector as
+//                             comma-separated floats, or empty when there is none
 //
 // Runs on this Mac only (Vision framework, no network). PDFs are rendered page
 // by page with PDFKit, up to MAX_PAGES. Exit 0 on success, 1 on a file Vision
@@ -9,6 +13,7 @@ import Foundation
 import Vision
 import PDFKit
 import ImageIO
+import NaturalLanguage
 
 let MAX_PAGES = 30
 let MAX_CHARS = 120_000
@@ -53,6 +58,36 @@ func pdfPages(_ url: URL, _ each: (CGImage) -> Bool) -> Bool {
     }
     return true
 }
+
+// Apple's sentence embeddings (macOS 11+), one model per language, on device.
+func embedLoop() -> Never {
+    var models: [String: NLEmbedding] = [:]
+    var tried = Set<String>()
+    func model(_ tag: String) -> NLEmbedding? {
+        if !tried.contains(tag) {
+            tried.insert(tag)
+            let lang: NLLanguage = tag == "zh" ? .simplifiedChinese : .english
+            models[tag] = NLEmbedding.sentenceEmbedding(for: lang)
+        }
+        return models[tag]
+    }
+    setvbuf(stdout, nil, _IOFBF, 1 << 16)
+    while let line = readLine(strippingNewline: true) {
+        var out = ""
+        if let tab = line.firstIndex(of: "\t") {
+            let tag = String(line[..<tab])
+            let text = String(line[line.index(after: tab)...]).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty, let m = model(tag), let v = m.vector(for: text) {
+                out = v.map { String(format: "%.5f", $0) }.joined(separator: ",")
+            }
+        }
+        print(out)
+    }
+    fflush(stdout)
+    exit(0)
+}
+
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "embed" { embedLoop() }
 
 guard CommandLine.arguments.count == 2 else {
     FileHandle.standardError.write("usage: lumen-ocr <file>\n".data(using: .utf8)!)

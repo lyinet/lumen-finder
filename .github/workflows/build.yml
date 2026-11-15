@@ -44,6 +44,20 @@ jobs:
           # Smoke test on a screenshot of Lumen itself: it shows the word 合同.
           /tmp/lumen-ocr docs/screenshots/quick.jpg | tee /tmp/ocr.txt | head -20
           grep -q "合同" /tmp/ocr.txt
+          # Sentence embeddings (semantic search): related sentences must sit
+          # closer than unrelated ones, in both Apple models.
+          printf 'zh\t北海道的雪景视频\nzh\t札幌冬天下雪拍的录像\nzh\t公司第三季度财务报表\nen\tsnow videos from hokkaido\nen\twinter footage in sapporo snow\nen\tquarterly finance spreadsheet\n' \
+            | /tmp/lumen-ocr embed > /tmp/emb.txt
+          python3 - <<'PY2'
+          import math
+          v = [[float(x) for x in l.split(",")] if l.strip() else None for l in open("/tmp/emb.txt").read().split("\n")[:6]]
+          def cos(a, b): return sum(x * y for x, y in zip(a, b)) / math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
+          for name, (q, near, far) in {"zh": (0, 1, 2), "en": (3, 4, 5)}.items():
+              if not v[q]: print(f"{name}: model unavailable on this runner"); continue
+              print(f"{name}: dims={len(v[q])} near={cos(v[q], v[near]):.3f} far={cos(v[q], v[far]):.3f}")
+              assert cos(v[q], v[near]) > cos(v[q], v[far]), name
+          assert v[3], "English sentence model missing"
+          PY2
       - name: Build universal app
         working-directory: app/src-tauri
         env:
@@ -106,3 +120,16 @@ jobs:
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/latest.json
           fail_on_unmatched_files: false
           generate_release_notes: true
+      # Point the Homebrew cask (Casks/lumen-finder.rb, this repo is the tap)
+      # at the new DMG.
+      - name: Update Homebrew cask
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          DMG=$(ls app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -1)
+          SHA=$(shasum -a 256 "$DMG" | cut -d' ' -f1)
+          git fetch origin main && git checkout -B main origin/main
+          sed -i '' -E "s/^  version \".*\"/  version \"$VER\"/; s/^  sha256 .*/  sha256 \"$SHA\"/" Casks/lumen-finder.rb
+          git diff --stat
+          git -c user.name=lumen-ci -c user.email=ci@users.noreply.github.com commit -am "cask: lumen-finder $VER [skip ci]" || exit 0
+          git push origin main

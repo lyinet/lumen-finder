@@ -15,6 +15,7 @@ pub mod insights;
 pub mod kind;
 pub mod scanner;
 pub mod search;
+pub mod semantic;
 pub mod timeline;
 pub mod watcher;
 
@@ -26,6 +27,10 @@ pub use insights::{DuplicateGroup, KindStat, Overview};
 pub use kind::Kind;
 pub use scanner::{scan, ScanPhase, ScanProgress, ScanReport};
 pub use search::{SearchRequest, SearchResponse, Sort};
+pub use semantic::{
+    index_semantic, semantic_search, set_embed_helper, set_embedder, Embedder, SemanticHit, SemanticProgress,
+    SemanticReport, SemanticRequest, SemanticResponse,
+};
 pub use timeline::{KindCount, MonthStat};
 pub use watcher::{ChangeBatch, Watcher};
 
