@@ -44,6 +44,7 @@ jobs:
           # Smoke test on a screenshot of Lumen itself: it shows the word 合同.
           /tmp/lumen-ocr docs/screenshots/quick.jpg | tee /tmp/ocr.txt | head -20
           grep -q "合同" /tmp/ocr.txt
+          /tmp/lumen-ocr embed-info
           # Sentence embeddings (semantic search): related sentences must sit
           # closer than unrelated ones, in both Apple models.
           printf 'zh\t北海道的雪景视频\nzh\t札幌冬天下雪拍的录像\nzh\t公司第三季度财务报表\nen\tsnow videos from hokkaido\nen\twinter footage in sapporo snow\nen\tquarterly finance spreadsheet\n' \

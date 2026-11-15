@@ -5,6 +5,7 @@
 //   lumen-ocr embed           stdin: one "zh\t<text>" or "en\t<text>" per line
 //                             stdout: one line each, the sentence vector as
 //                             comma-separated floats, or empty when there is none
+//   lumen-ocr embed-info      which embedding model each language uses here
 //
 // Runs on this Mac only (Vision framework, no network). PDFs are rendered page
 // by page with PDFKit, up to MAX_PAGES. Exit 0 on success, 1 on a file Vision
@@ -59,15 +60,60 @@ func pdfPages(_ url: URL, _ each: (CGImage) -> Bool) -> Bool {
     return true
 }
 
-// Apple's sentence embeddings (macOS 11+), one model per language, on device.
+// Text embeddings, on device, no downloads. For each language the best
+// model this Mac already has wins:
+//   1. NLEmbedding sentence embedding (macOS 11+; not every language/Mac)
+//   2. NLContextualEmbedding, mean of token vectors (macOS 14+, only when
+//      its assets are already on disk; we never request a download)
+//   3. NLEmbedding word embedding, mean of word vectors
+// A backend is chosen once per process, so every vector from one helper
+// build on one Mac is comparable. `lumen-ocr embed-info` names them.
+typealias Embed = (String) -> [Double]?
+
+func mean(_ rows: [[Double]]) -> [Double]? {
+    guard let first = rows.first, !first.isEmpty else { return nil }
+    var acc = [Double](repeating: 0, count: first.count)
+    for r in rows where r.count == acc.count { for i in 0..<r.count { acc[i] += r[i] } }
+    return acc.map { $0 / Double(rows.count) }
+}
+
+func backend(_ lang: NLLanguage) -> (String, Embed)? {
+    if let m = NLEmbedding.sentenceEmbedding(for: lang) {
+        return ("sentence:\(m.dimension)", { m.vector(for: $0) })
+    }
+    if #available(macOS 14.0, *), let ce = NLContextualEmbedding(language: lang), ce.hasAvailableAssets,
+       (try? ce.load()) != nil {
+        return ("contextual:\(ce.dimension)", { text in
+            guard let r = try? ce.embeddingResult(for: text, language: lang) else { return nil }
+            var rows: [[Double]] = []
+            r.enumerateTokenVectors(in: text.startIndex..<text.endIndex) { v, _ in rows.append(v); return true }
+            return mean(rows)
+        })
+    }
+    if let w = NLEmbedding.wordEmbedding(for: lang) {
+        return ("word:\(w.dimension)", { text in
+            let tok = NLTokenizer(unit: .word)
+            tok.string = text
+            var rows: [[Double]] = []
+            tok.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+                if let v = w.vector(for: text[range].lowercased()) { rows.append(v) }
+                return true
+            }
+            return mean(rows)
+        })
+    }
+    return nil
+}
+
+func language(_ tag: String) -> NLLanguage { tag == "zh" ? .simplifiedChinese : .english }
+
 func embedLoop() -> Never {
-    var models: [String: NLEmbedding] = [:]
+    var models: [String: Embed] = [:]
     var tried = Set<String>()
-    func model(_ tag: String) -> NLEmbedding? {
+    func model(_ tag: String) -> Embed? {
         if !tried.contains(tag) {
             tried.insert(tag)
-            let lang: NLLanguage = tag == "zh" ? .simplifiedChinese : .english
-            models[tag] = NLEmbedding.sentenceEmbedding(for: lang)
+            models[tag] = backend(language(tag))?.1
         }
         return models[tag]
     }
@@ -77,16 +123,19 @@ func embedLoop() -> Never {
         if let tab = line.firstIndex(of: "\t") {
             let tag = String(line[..<tab])
             let text = String(line[line.index(after: tab)...]).trimmingCharacters(in: .whitespaces)
-            if !text.isEmpty, let m = model(tag), let v = m.vector(for: text) {
+            if !text.isEmpty, let m = model(tag), let v = m(text), v.contains(where: { $0 != 0 }) {
                 out = v.map { String(format: "%.5f", $0) }.joined(separator: ",")
             }
         }
         print(out)
     }
-    fflush(stdout)
     exit(0)
 }
 
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "embed-info" {
+    for tag in ["zh", "en"] { print("\(tag)\t\(backend(language(tag))?.0 ?? "none")") }
+    exit(0)
+}
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "embed" { embedLoop() }
 
 guard CommandLine.arguments.count == 2 else {
