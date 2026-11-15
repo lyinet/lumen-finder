@@ -6,7 +6,7 @@
 # CI rewrites version and sha256 after every tagged release.
 cask "lumen-finder" do
   version "0.6.0"
-  sha256 :no_check
+  sha256 "a1acd61c24ce4773b0b7a37990256b6d45454f160423c29735bee3302c21b5b9"
 
   url "https://github.com/lyinet/lumen-finder/releases/download/v#{version}/Lumen_#{version}_universal.dmg"
   name "Lumen"
