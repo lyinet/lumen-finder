@@ -25,6 +25,15 @@
 
 <br>
 
+## ✦ v0.6 新增：按意思搜索 · Homebrew 安装
+
+<p align="center">
+  <img src="docs/screenshots/semantic.jpg" alt="按意思搜索" width="80%">
+</p>
+
+- **按意思搜索（测试版）** — 不记得文件名也没关系，直接描述："北海道的雪景视频"、"去年签的租房合同"。Lumen 用 macOS 自带的语言模型理解每个文件讲的是什么，模型就在系统里，不下载、不联网。搜索栏点 ✦ 或按 ⌘J 切换；关键词搜不到时也会提示你按意思再找一次。
+- **Homebrew 一行安装** — `brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder && brew install --cask lumen-finder`
+
 ## ✦ v0.5 新增：时间线 · 分享卡片 · 应用内更新
 
 <p align="center">
@@ -160,7 +169,16 @@
 
 ## ✦ 安装
 
-> 首个签名版本发布前，请从源码构建（约 3 分钟）。
+**Homebrew（推荐）**
+
+```bash
+brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder
+brew install --cask lumen-finder
+```
+
+或从 [Releases](https://github.com/lyinet/lumen-finder/releases/latest) 下载 DMG（尚未公证，首次打开请右键 → 打开）。之后新版本会在应用内提示更新。
+
+**从源码构建**（约 3 分钟）
 
 ```bash
 xcode-select --install
@@ -189,6 +207,7 @@ cd app/ui && python3 -m http.server 8765
 ```bash
 cargo run -p lumen-cli -- scan ~          # 扫描后自动读取正文
 cargo run -p lumen-cli -- search 合同 kind:pdf
+cargo run -p lumen-cli -- ask 北海道的雪景视频   # 按意思搜索（需要已安装 Lumen.app）
 cargo run -p lumen-cli -- stats
 cargo run -p lumen-cli -- dupes
 ```
@@ -218,9 +237,9 @@ crates/lumen-cli    命令行
 - [x] 图片与扫描件 **OCR**（本地 Apple Vision） <sub>v0.4</sub>
 - [x] 快速搜索小窗 · 开机自启 · 浅色主题 · 二字词正文索引 <sub>v0.3</sub>
 - [x] 应用内自动更新 <sub>v0.5</sub> · 时间线 · 分享卡片 <sub>v0.5</sub>
-- [ ] Homebrew cask
+- [x] Homebrew cask <sub>v0.6</sub>
 - [x] 智能合集：发票、合同、证件、截图、简历 <sub>v0.4</sub>
-- [ ] 本地语义搜索："北海道的雪景视频"
+- [x] 本地语义搜索："北海道的雪景视频" <sub>v0.6 测试版</sub>
 
 完整计划见 [docs/PRODUCT.md](docs/PRODUCT.md)。
 

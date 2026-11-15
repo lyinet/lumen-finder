@@ -85,6 +85,7 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 
 /* ---------- shell ---------- */
 .app { position: relative; z-index: 2; display: grid; grid-template-columns: 216px 1fr; height: 100vh; transition: opacity .5s var(--ease), filter .5s var(--ease); }
+.app > .main, .app > .sidebar { min-height: 0; }
 .app.dimmed { opacity: 0; filter: blur(12px); pointer-events: none; }
 .glass { background: var(--panel); border-right: 1px solid var(--line); backdrop-filter: blur(30px) saturate(1.4); -webkit-backdrop-filter: blur(30px) saturate(1.4); }
 .sidebar { display: flex; flex-direction: column; padding: 54px 12px 14px; }
@@ -416,7 +417,7 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 .view.semantic .searchbar > svg path { fill: currentColor; stroke: none; }
 .view.semantic .searchbar { box-shadow: 0 24px 70px -26px rgba(192,139,255,.55), inset 0 1px 0 rgba(255,255,255,.08); }
 .view.semantic #seg { visibility: hidden; }
-.row .badge.rel { border: none; color: #0b0b14; padding: 1px 7px; background: linear-gradient(90deg, #c08bff var(--p), color-mix(in srgb, #c08bff 35%, transparent) var(--p)); }
+.row .badge.rel { border: 1px solid color-mix(in srgb, #c08bff 55%, transparent); color: var(--text); padding: 1px 7px; background: color-mix(in srgb, #c08bff calc(var(--p) * .45), transparent); }
 .empty .orb.sem { background: radial-gradient(circle at 35% 30%, #fff 0, #ffd5c7 16%, #c08bff 42%, transparent 70%); filter: drop-shadow(0 0 44px rgba(192,139,255,.7)); }
 .tips .sem-try { display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-size: 12.5px; border-style: solid; border-color: transparent; color: #0b0b14; background: var(--accent-grad); }
 .tips .sem-try svg { width: 13px; height: 13px; fill: currentColor; }

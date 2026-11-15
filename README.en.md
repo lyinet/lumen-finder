@@ -25,6 +25,15 @@
 
 <br>
 
+## ✦ New in v0.6: search by meaning, Homebrew
+
+<p align="center">
+  <img src="docs/screenshots/semantic-en.jpg" alt="Search by meaning" width="80%">
+</p>
+
+- **Search by meaning (beta)** — describe the file instead of remembering its name: "snow videos from Japan", "the lease I signed last year". Lumen uses the language model built into macOS to learn what each file is about; nothing to download, nothing leaves your Mac. Click ✦ in the search bar or press ⌘J.
+- **Homebrew** — `brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder && brew install --cask lumen-finder`
+
 ## ✦ New in v0.5: timeline, share card, in-app updates
 
 - **Timeline** — every month of your files at a glance, with what each month was made of; open a month and filter by type.
@@ -125,7 +134,16 @@ The index never leaves your Mac. No uploads, no telemetry; the only request is a
 
 ## ✦ Install
 
-> Until the first signed release, build from source (~3 minutes).
+**Homebrew**
+
+```bash
+brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder
+brew install --cask lumen-finder
+```
+
+Or download the DMG from [Releases](https://github.com/lyinet/lumen-finder/releases/latest) (not notarized yet: right-click → Open the first time). Later versions arrive as in-app updates.
+
+**Build from source** (~3 minutes)
 
 ```bash
 xcode-select --install
@@ -157,16 +175,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## ✦ Roadmap
 
 - [x] Full scan + live sync, substring/pinyin search, filters, insights, duplicates
-- [ ] Signed, notarized DMG + auto-update · Homebrew cask
+- [ ] Signed, notarized DMG
+- [x] Homebrew cask <sub>v0.6</sub>
 - [x] Menu bar icon · custom hotkey · Full Disk Access guide <sub>v0.2</sub>
 - [x] Offline external drives <sub>v0.2</sub>
 - [x] Move duplicates to Trash <sub>v0.2</sub>
 - [x] **Content search** for PDF / Word / Markdown / PowerPoint / Excel / EPUB <sub>v0.2</sub>
-- [ ] Image and scanned-PDF **OCR** (on-device Apple Vision)
+- [x] Image and scanned-PDF **OCR** (on-device Apple Vision) <sub>v0.4</sub>
 - [x] Quick panel · open at login · light theme · faster CJK text index <sub>v0.3</sub>
-- [ ] In-app auto-update · Homebrew
-- [ ] Smart collections: invoices, contracts, ID photos, screenshots
-- [ ] On-device semantic search
+- [x] In-app auto-update · timeline · share card <sub>v0.5</sub>
+- [x] Smart collections: invoices, contracts, IDs, screenshots, résumés <sub>v0.4</sub>
+- [x] On-device semantic search <sub>v0.6 beta</sub>
 
 <br>
 

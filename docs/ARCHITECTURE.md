@@ -122,3 +122,12 @@ triggers a rescan.
 The bigram index trades true substring matching inside Latin words (`venue`
 no longer finds `revenue`) for word/prefix matching, which is what people
 type anyway.
+
+## Semantic search (v0.6, beta)
+
+- **Model**: Apple's `NLEmbedding.sentenceEmbedding` (NaturalLanguage, macOS 11+), called from the existing Swift helper as `lumen-ocr embed` (stdin `zh|en<TAB>text` lines, stdout one comma-separated vector per line). It ships with macOS: no model download, no network, no extra binary size. Apple has one model per language, so vectors are only compared within a model.
+- **What gets embedded**: one sentence per file: the name split into words (`_ - .` and camelCase), the last two folder names, and the first 240 characters of its text when content search read it. Han characters → Chinese model, otherwise English. Queries are embedded with both models; a match through the other language's model is weighted ×0.85.
+- **Storage**: `vectors(id, mtime, size, model, vec)`; `vec` is a 4-byte f32 scale + one i8 per dimension (~0.5 KB per file at 512 dims). Rows are refreshed when a file's size/mtime change and deleted with the file. A file the model cannot embed keeps an empty row so it is not retried.
+- **Search**: brute-force dot product over an in-memory copy, reloaded when `meta.vec_rev` changes. 100k files ≈ 50 MB and tens of milliseconds; no ANN index to keep in sync. Scores under 0.30 are dropped.
+- **Pipeline**: after a scan, content reading runs first (vectors use the text), then embedding in batches of 128, newest files first. Live FSEvents changes are embedded on the next scan.
+- **Tests**: `semantic_search_finds_by_meaning` drives the whole path with a stand-in concept embedder; CI checks the real helper ranks a related sentence above an unrelated one.

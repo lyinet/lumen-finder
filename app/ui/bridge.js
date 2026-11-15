@@ -141,8 +141,8 @@ function mockBridge() {
 
   // Stand-in for Apple's sentence model: concepts several words point to.
   const CONCEPTS = [
-    [/雪|snow|ski|powder|niseko|滑雪|冬/i, 1], [/北海道|札幌|小樽|hokkaido|niseko|日本|京都|japan/i, 1], [/视频|影片|video|录屏|mov|mp4|dji/i, .6],
-    [/旅行|行程|trip|travel|movies\/旅行/i, .7], [/合同|协议|contract|lease|租/i, 1], [/报价|quote|发票|invoice|收据|receipt/i, .9],
+    [/雪|snow|ski|powder|niseko|滑雪|冬/i, 1], [/北海道|札幌|小樽|hokkaido|niseko|日本|japan/i, 1], [/视频|影片|video|录屏|mov|mp4|dji/i, .6],
+    [/旅行|行程|trip|travel/i, .5], [/合同|协议|contract|lease|租/i, 1], [/报价|quote|发票|invoice|收据|receipt/i, .9],
     [/照片|photo|全家福|img|pictures/i, .6], [/毕业|graduation|答辩/i, 1], [/预算|budget|开销|money/i, 1], [/路演|融资|pitch|deck/i, 1],
   ]
   const DATES = { 2025: /DJI_0032|niseko|小樽|札幌|ski-rental/, 去年: /DJI_0032|niseko|小樽|札幌|ski-rental|冬季/ }
@@ -152,12 +152,12 @@ function mockBridge() {
     const qn = Math.hypot(...qv) || 1
     const hits = []
     for (const f of files) {
-      const text = `${f.name} ${f.parent} ${f.kind} ${f.ext}`
+      const text = `${f.name} ${f.parent.split('/').slice(-2).join(' ')} ${f.ext}`
       const v = vec(text), n = Math.hypot(...v)
       if (!n) continue
       let s = v.reduce((a, x, i) => a + x * qv[i], 0) / (n * qn)
       for (const [w, re] of Object.entries(DATES)) if (req.query.includes(w) && re.test(f.name)) s += .08
-      if (s > .45 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, score: Math.min(.97, s * .93) })
+      if (s > .58 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, score: Math.min(.97, s * .93) })
     }
     hits.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
     return { hits: hits.slice(0, req.limit || 40), indexed: files.length, took_us: Math.round((performance.now() - t0) * 1000) + 9000 }
