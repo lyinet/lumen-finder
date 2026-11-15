@@ -12,7 +12,8 @@ const ROWS = 8
 let hits = [], total = 0, sel = 0, seq = 0, home = '', timer = 0
 
 q.placeholder = T.quick_ph
-const shortPath = p => home && p.startsWith(home) ? '~' + p.slice(home.length) : p
+const shortPath = p => !home || !p.startsWith(home) ? p
+  : p.slice(home.length).startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + p.slice(home.length + 45) : '~' + p.slice(home.length)
 
 function row(f, terms, i) {
   const sub = f.snippet
@@ -21,7 +22,7 @@ function row(f, terms, i) {
   return `<div class="qr ${i === sel ? 'on' : ''} ${f.offline ? 'off' : ''}" data-i="${i}">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
     <div class="qt"><div class="qn">${highlight(f.name, terms)}</div><div class="qsub">${sub}</div></div>
-    <div class="qm">${f.offline ? ICON.drive : `${bytes(f.size)} · ${ago(f.mtime)}`}</div></div>`
+    <div class="qm">${f.offline ? ICON.drive : f.cloud ? `${ICON.cloud}${ago(f.mtime)}` : `${bytes(f.size)} · ${ago(f.mtime)}`}</div></div>`
 }
 
 function draw() {
@@ -88,6 +89,8 @@ function summon() {
 ;(async () => {
   const snap = await api.snapshot(); home = snap.home; applyTheme(snap.config.theme)
   await api.on('quick://show', summon)
+  // lumen://quick?q=…
+  await api.on('app://query', v => { q.value = v; run() })
   await api.on('app://theme', applyTheme)
   const hash = decodeURIComponent(location.hash.slice(1))
   if (hash.startsWith('q=')) q.value = hash.slice(2)

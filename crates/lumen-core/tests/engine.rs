@@ -380,3 +380,26 @@ fn semantic_reembeds_when_a_model_arrives() {
     assert_eq!(semantic::semantic_count(&index).unwrap(), 2);
     set_embedder(None);
 }
+
+#[test]
+fn icloud_placeholders_are_kept_but_never_read() {
+    let _g = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("iCloud/.季度预算.md.icloud"), b"bplist00 placeholder");
+    touch(&home.join("iCloud/本地笔记.md"), "预算已经批准".as_bytes());
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(index.file_count().unwrap(), 2);
+
+    let r = index.search(&SearchRequest { query: "季度预算".into(), limit: 10, ..Default::default() }).unwrap();
+    let hit = r.hits.first().expect("found by its real name");
+    assert_eq!(hit.name, "季度预算.md");
+    assert_eq!(hit.ext, "md");
+    assert!(hit.cloud);
+    assert_eq!(hit.size, 0);
+
+    let r = index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(r.read, 1, "only the local note is opened");
+}

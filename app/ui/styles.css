@@ -300,6 +300,7 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 .row.offline .tile, .row.offline .name > :not(.badge), .row.offline .path { opacity: .55; }
 .row .badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; vertical-align: 1px; font-size: 10px; font-weight: 600; padding: 1px 6px 1px 4px; border-radius: 99px; color: var(--text-2); border: 1px dashed var(--line-2); }
 .row .badge svg { width: 11px; height: 11px; }
+.row .badge.cloud { border-style: solid; border-color: color-mix(in srgb, #5ac8fa 45%, transparent); color: #5ac8fa; }
 
 /* Duplicates: choose the keeper, trash the rest */
 .dupe { transition: opacity .5s var(--ease), transform .5s var(--ease); }

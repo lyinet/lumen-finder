@@ -9,6 +9,10 @@
 //!   lumen dupes                 likely duplicate files
 //!   lumen --db PATH …           use another index file
 //!   lumen --json …              machine-readable output
+//!   lumen --alfred search|ask … Alfred Script Filter JSON (see integrations/alfred)
+//!
+//! Lumen.app ships this binary at Lumen.app/Contents/MacOS/lumen; the Homebrew
+//! cask links it onto PATH.
 
 use anyhow::Result;
 use lumen_core::*;
@@ -18,7 +22,8 @@ use std::sync::Arc;
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let json = take_flag(&mut args, "--json");
+    let alfred = take_flag(&mut args, "--alfred");
+    let json = take_flag(&mut args, "--json") && !alfred;
     let db = take_opt(&mut args, "--db").map(PathBuf::from).unwrap_or_else(default_db);
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
     let index = Index::open(&db)?;
@@ -57,11 +62,20 @@ fn main() -> Result<()> {
         "content" => read_content(&index, json)?,
         "search" | "s" => {
             let r = index.search(&SearchRequest { query: args.join(" "), limit: 30, ..Default::default() })?;
-            if json {
+            if alfred {
+                print_alfred(r.hits.iter().map(|h| (h, h.snippet.as_deref())))?;
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else {
                 for h in &r.hits {
-                    println!("{:<12} {:>9}  {}{}", h.kind.slug(), human(h.size), h.path, if h.offline { "  (offline)" } else { "" });
+                    let tag = if h.offline {
+                        "  (offline)"
+                    } else if h.cloud {
+                        "  (iCloud)"
+                    } else {
+                        ""
+                    };
+                    println!("{:<12} {:>9}  {}{tag}", h.kind.slug(), human(h.size), h.path);
                     if let Some(s) = &h.snippet {
                         println!("{:>24}{s}", "");
                     }
@@ -72,15 +86,17 @@ fn main() -> Result<()> {
         "ask" => {
             anyhow::ensure!(lumen_core::semantic::available(), "semantic search needs Lumen.app (set LUMEN_HELPER to lumen-ocr)");
             let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
-                if !json && !p.finished && p.total > 0 {
+                if !json && !alfred && !p.finished && p.total > 0 {
                     eprint!("\r\x1b[2K  learning {}/{} files", p.done, p.total);
                 }
             })?;
-            if !json && r.embedded > 0 {
+            if !json && !alfred && r.embedded > 0 {
                 eprintln!();
             }
             let r = semantic_search(&index, &SemanticRequest { query: args.join(" "), limit: 20, ..Default::default() })?;
-            if json {
+            if alfred {
+                print_alfred(r.hits.iter().map(|h| (&h.file, None)))?;
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else {
                 for h in &r.hits {
@@ -115,7 +131,7 @@ fn main() -> Result<()> {
             }
         }
         _ => {
-            println!("lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json]");
+            println!("lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]");
         }
     }
     Ok(())
@@ -133,6 +149,40 @@ fn read_content(index: &Index, json: bool) -> Result<()> {
         eprintln!();
         println!("Read {} documents ({} with text, {} unreadable) in {:.2}s", r.read, r.with_text, r.failed, r.elapsed_ms as f64 / 1000.0);
     }
+    Ok(())
+}
+
+/// Alfred Script Filter: one item per file, ↵ opens it, ⌘↵ reveals it
+/// (Alfred's own file actions), and Alfred previews it with ⇧ / ⌘Y.
+fn print_alfred<'a>(hits: impl Iterator<Item = (&'a FileRecord, Option<&'a str>)>) -> Result<()> {
+    let items: Vec<serde_json::Value> = hits
+        .map(|(f, snippet)| {
+            let place = f.parent.replace(&std::env::var("HOME").unwrap_or_default(), "~");
+            let mut sub = match snippet {
+                Some(s) => format!("{s} · {place}"),
+                None => place,
+            };
+            if f.cloud {
+                sub = format!("☁ iCloud · {sub}");
+            }
+            serde_json::json!({
+                "uid": f.path,
+                "type": "file",
+                "title": f.name,
+                "subtitle": sub,
+                "arg": f.path,
+                "quicklookurl": f.path,
+                "icon": { "type": "fileicon", "path": f.path },
+                "mods": { "cmd": { "arg": f.path, "subtitle": "Reveal in Finder" } },
+            })
+        })
+        .collect();
+    let items = if items.is_empty() {
+        vec![serde_json::json!({ "title": "No matches", "subtitle": "Try fewer words, or search by meaning with “la”", "valid": false })]
+    } else {
+        items
+    };
+    println!("{}", serde_json::json!({ "items": items }));
     Ok(())
 }
 
@@ -158,10 +208,17 @@ fn config_path() -> PathBuf {
     data_dir().join("config.json")
 }
 
-/// The embedding helper: $LUMEN_HELPER, else the one inside Lumen.app.
+/// The embedding helper: $LUMEN_HELPER, else the one next to this binary
+/// (inside Lumen.app, also when linked by Homebrew), else /Applications.
 fn helper_path() -> PathBuf {
-    std::env::var_os("LUMEN_HELPER")
-        .map(PathBuf::from)
+    if let Some(p) = std::env::var_os("LUMEN_HELPER") {
+        return PathBuf::from(p);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok())
+        .and_then(|e| e.parent().map(|d| d.join("lumen-ocr")))
+        .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from("/Applications/Lumen.app/Contents/MacOS/lumen-ocr"))
 }
 

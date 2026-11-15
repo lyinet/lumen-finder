@@ -12,3 +12,9 @@
 - 下一大版本计划 v0.7（生态与集成），见 docs/PRODUCT.md。
 - 2026-11-16：cbb5775 的 CI 未启动——GitHub 提示账户付款失败或需提高 spending limit（仓库为 private，macOS 分钟按 10 倍计）。v0.6.1 tag 尚未打。
 - 发现：仓库 private 时，Release 资产（latest.json、DMG）与 brew tap 对外不可访问，应用内更新和 Homebrew 安装在用户机器上都会失败。待用户决定：改为 public（同时解决 CI 计费），或修复账单并另找公开发布渠道。
+- 2026-11-16 用户决定：开发阶段仓库保持 private，正式发布时改 public。v0.6.1 tag 已在本地打在 ab85480，CI 恢复后再推。
+
+## v0.7.0 — 开发中（2026-11-16）
+- 范围：生态与集成 + iCloud。Raycast 扩展（integrations/raycast，tsc 通过）、Alfred 工作流（integrations/alfred，CLI `--alfred`）、`lumen://search|ask|quick?q=`（Info.plist + RunEvent::Opened，冷启动经 take_link）、CLI 随 App 打包（externalBin binaries/lumen，cask `binary`）、iCloud 云盘收录（root_exceptions；`.icloud` 占位与 SF_DATALESS 标为 cloud，不读正文/OCR/查重）。
+- lumen-core 测试 17 + 9 全过；Tauri 外壳与 CI 新步骤（CLI 双架构、bundle 校验、Alfred 打包）未经 CI 验证（账单阻塞）。
+- 截图：docs/screenshots/icloud.jpg、icloud-en.jpg、settings-icloud.jpg。

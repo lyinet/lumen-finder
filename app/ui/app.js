@@ -9,7 +9,11 @@ const $ = (s, el = document) => el.querySelector(s)
 const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild }
 const KINDS = ['document', 'pdf', 'spreadsheet', 'presentation', 'image', 'video', 'audio', 'ebook', 'design', 'archive']
 const fmt = n => Number(n).toLocaleString()
-function shortPath(p) { return state.home && p.startsWith(state.home) ? '~' + p.slice(state.home.length) : p }
+function shortPath(p) {
+  if (!state.home || !p.startsWith(state.home)) return p
+  const rest = p.slice(state.home.length)
+  return rest.startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + rest.slice(45) : '~' + rest
+}
 
 /** Count up to a number with an ease-out, like a odometer settling. */
 function tween(el, to, { dur = 900, format = fmt } = {}) {
@@ -89,8 +93,8 @@ function rowHTML(f, terms = [], i = 0, extra = '') {
     : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
   return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
-    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
-    <div class="size">${bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
+    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${f.cloud ? `<span class="badge cloud" title="${esc(T.cloud_tip)}">${ICON.cloud}${esc(T.cloud)}</span>` : ''}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
+    <div class="size">${f.cloud && !f.size ? '—' : bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
 }
 
 function bindRows(container, getList) {
@@ -500,6 +504,7 @@ async function viewSettings(v) {
     ${toggleRow('content', T.set_content, T.set_content_p, snap.config.content_search !== false)}
     ${toggleRow('ocr', T.set_ocr, T.set_ocr_p, snap.config.ocr !== false)}
     ${toggleRow('semantic', T.set_semantic, T.set_semantic_p, snap.config.semantic !== false)}
+    ${toggleRow('icloud', T.set_icloud, T.set_icloud_p, snap.config.include_icloud !== false)}
     ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
   form.append(feats)
   const gen = h(`<div class="field"><h3>${T.set_general}</h3>
@@ -520,7 +525,7 @@ async function viewSettings(v) {
   })
   feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, external: { includeExternal: on } }[sw.dataset.k])
+    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, icloud: { includeIcloud: on }, external: { includeExternal: on } }[sw.dataset.k])
     state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
   })
   const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>
@@ -784,13 +789,20 @@ async function boot() {
   await api.on('app://summon', () => { if (state.view !== 'search') go('search'); setTimeout(() => $('#q')?.select(), 30) })
   // "See all in Lumen" from the quick panel.
   await api.on('app://query', q => { state.query = q; state.kinds.clear(); state.view = 'search'; movePill(); render(); setTimeout(() => $('#q')?.focus(), 30) })
+  // lumen://search?q=… and lumen://ask?q=… (Raycast, Alfred, Shortcuts, links).
+  const openLink = l => {
+    if (!l) return
+    state.semantic = l.mode === 'ask' && semReady(); state.query = l.query || ''; state.kinds.clear()
+    state.view = 'search'; movePill(); render(); setTimeout(() => $('#q')?.focus(), 30)
+  }
+  await api.on('app://link', l => { api.takeLink(); openLink(l) })
   await api.on('app://theme', applyTheme)
   await api.on('update-available', updateBanner)
   if (!isApp && location.hash.includes('update')) setTimeout(async () => updateBanner(await api.checkUpdate()), 600)
   const snap = await refreshSnapshot()
   applyTheme(!isApp && /light|dark/.test(location.hash) ? location.hash.match(/light|dark/)[0] : snap.config.theme)
   if (snap.firstRun) onboarding()
-  else render()
+  else { render(); openLink(await api.takeLink()) }
   // demo hooks for previews: #scan, #done, #insights …
   const hash = location.hash.slice(1)
   if (!isApp && hash === 'scan') startFirstScan()

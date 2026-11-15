@@ -59,6 +59,18 @@ jobs:
               assert cos(v[q], v[near]) > cos(v[q], v[far]), name
           assert v[3], "English sentence model missing"
           PY2
+      - name: Build the lumen CLI (bundled in Lumen.app)
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release -p lumen-cli --target $t
+          done
+          lipo -create target/aarch64-apple-darwin/release/lumen target/x86_64-apple-darwin/release/lumen -output /tmp/lumen
+          for t in universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
+            cp /tmp/lumen app/src-tauri/binaries/lumen-$t
+          done
+          /tmp/lumen --alfred search lumen | python3 -c "import json,sys; json.load(sys.stdin)['items']"
+      - name: Package the Alfred workflow
+        run: cd integrations/alfred && zip -r "$GITHUB_WORKSPACE/Lumen.alfredworkflow" info.plist
       - name: Build universal app
         working-directory: app/src-tauri
         env:
@@ -88,6 +100,10 @@ jobs:
             extra=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
           fi
           cargo tauri build --target universal-apple-darwin "${extra[@]}"
+          # The bundled CLI and the lumen:// scheme made it into the app.
+          A=target/universal-apple-darwin/release/bundle/macos/Lumen.app
+          test -x "$A/Contents/MacOS/lumen"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$A/Contents/Info.plist" | grep -qx lumen
       - name: Update manifest (latest.json)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -119,6 +135,7 @@ jobs:
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Lumen_universal.app.tar.gz
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Lumen_universal.app.tar.gz.sig
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/latest.json
+            Lumen.alfredworkflow
           fail_on_unmatched_files: false
           generate_release_notes: true
       # Point the Homebrew cask (Casks/lumen-finder.rb, this repo is the tap)

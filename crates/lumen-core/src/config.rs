@@ -36,6 +36,9 @@ pub struct Config {
     /// Semantic search (v0.6, beta): embed every file on device so it can be
     /// found by what it is about.
     pub semantic: bool,
+    /// Index iCloud Drive (~/Library/Mobile Documents/com~apple~CloudDocs),
+    /// downloaded or not. Files not on this Mac are listed, never opened.
+    pub include_icloud: bool,
 }
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -187,6 +190,7 @@ impl Default for Config {
             theme: "auto".to_string(),
             auto_update: true,
             semantic: true,
+            include_icloud: true,
         }
     }
 }
@@ -195,6 +199,11 @@ impl Default for Config {
 /// people lose tend to be in the folders nobody thinks to add.
 pub fn default_roots() -> Vec<PathBuf> {
     dirs::home_dir().into_iter().collect()
+}
+
+/// iCloud Drive's folder. It sits inside ~/Library, which is otherwise skipped.
+pub fn icloud_drive() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/Mobile Documents/com~apple~CloudDocs"))
 }
 
 impl Config {
@@ -219,27 +228,33 @@ impl Config {
         if self.include_external {
             roots.extend(external_volumes(Path::new(VOLUMES)));
         }
+        if self.include_icloud {
+            roots.extend(icloud_drive().filter(|p| p.is_dir()));
+        }
         roots.sort();
         roots.dedup();
-        let mut out: Vec<PathBuf> = Vec::new();
-        for r in roots {
-            if !out.iter().any(|o| r.starts_with(o)) {
-                out.push(r);
-            }
-        }
-        out
+        dedup_roots(roots, &self.blocked_paths())
+    }
+
+    /// System locations plus the user's own exclusions.
+    fn blocked_paths(&self) -> Vec<PathBuf> {
+        let mut paths = system_paths();
+        paths.extend(self.excluded_paths.iter().cloned());
+        paths
     }
 
     /// The single gate every path goes through, for full scans and the watcher.
     pub fn filter(&self) -> PathFilter {
-        let mut paths = system_paths();
-        paths.extend(self.excluded_paths.iter().cloned());
-        // A root the user picked explicitly wins over the system list
-        // (someone may really want /Volumes/Archive or /opt/media).
+        let paths = self.blocked_paths();
+        // A root inside a skipped location wins over it for its own subtree
+        // (iCloud Drive inside ~/Library, or someone's /opt/media), and only
+        // there: the rest of ~/Library stays skipped.
         let roots = self.effective_roots();
-        paths.retain(|p| !roots.iter().any(|r| r.starts_with(p) && r != p) && !roots.contains(p));
+        let root_exceptions: Vec<PathBuf> =
+            roots.iter().filter(|r| paths.iter().any(|p| r.starts_with(p))).cloned().collect();
         PathFilter {
             excluded_paths: paths,
+            root_exceptions,
             excluded_names: self.excluded_names.clone(),
             min_size: self.min_size,
             include_hidden: self.include_hidden,
@@ -250,6 +265,7 @@ impl Config {
 #[derive(Debug, Clone)]
 pub struct PathFilter {
     excluded_paths: Vec<PathBuf>,
+    root_exceptions: Vec<PathBuf>,
     excluded_names: Vec<String>,
     pub min_size: u64,
     include_hidden: bool,
@@ -273,12 +289,19 @@ impl PathFilter {
                 return false;
             }
         }
-        !self.excluded_paths.iter().any(|p| path.starts_with(p))
+        !self.excluded_paths.iter().any(|p| {
+            path.starts_with(p) && !self.root_exceptions.iter().any(|r| path.starts_with(r) && r.starts_with(p))
+        })
     }
 
     /// Is this file one Lumen keeps? Returns its kind when so.
     pub fn classify_file(&self, path: &Path) -> Option<crate::Kind> {
         let name = path.file_name()?.to_str()?;
+        // An iCloud Drive file that is not downloaded (".报告.pdf.icloud"):
+        // kept under its real name, whatever the hidden-files setting.
+        if let Some(real) = icloud_placeholder(name) {
+            return crate::Kind::from_ext(Path::new(real).extension()?.to_str()?);
+        }
         if !self.include_hidden && name.starts_with('.') {
             return None;
         }
@@ -289,10 +312,17 @@ impl PathFilter {
         crate::Kind::from_ext(ext)
     }
 
+    /// Big enough to keep? Files still in iCloud are always kept: their
+    /// placeholder is tiny but the file is not.
+    pub fn keep_size(&self, path: &Path, meta: &std::fs::Metadata) -> bool {
+        meta.len() >= self.min_size || crate::index::is_cloud(path, meta)
+    }
+
     /// Every ancestor must also be allowed (used by the watcher, which sees
     /// single paths rather than walking down from a root).
     pub fn allow_path_chain(&self, path: &Path, roots: &[PathBuf]) -> bool {
-        let root = match roots.iter().find(|r| path.starts_with(r)) {
+        // The innermost root: iCloud Drive rather than the home folder around it.
+        let root = match roots.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.as_os_str().len()) {
             Some(r) => r,
             None => return false,
         };
@@ -308,6 +338,26 @@ impl PathFilter {
         }
         true
     }
+}
+
+/// Drop roots already covered by another, unless something between them is
+/// skipped (then the outer walk never reaches the inner root).
+fn dedup_roots(sorted: Vec<PathBuf>, blocked: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in sorted {
+        let covered = out.iter().any(|o| r.starts_with(o) && !blocked.iter().any(|p| r.starts_with(p) && p.starts_with(o) && p != o));
+        if !covered {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The real name behind an iCloud placeholder: ".Report.pdf.icloud" →
+/// "Report.pdf". macOS before 14 keeps files that are not downloaded as these.
+pub fn icloud_placeholder(name: &str) -> Option<&str> {
+    let real = name.strip_prefix('.')?.strip_suffix(".icloud")?;
+    (!real.is_empty() && !real.starts_with('.')).then_some(real)
 }
 
 #[cfg(test)]
@@ -326,6 +376,31 @@ mod tests {
         assert!(f.classify_file(Path::new("/x/简历.pdf")).is_some());
         assert!(f.classify_file(Path::new("/x/~$report.docx")).is_none());
         assert!(f.classify_file(Path::new("/x/lib.dylib")).is_none());
+        assert_eq!(f.classify_file(Path::new("/x/.报告.pdf.icloud")), Some(crate::Kind::Pdf));
+        assert_eq!(icloud_placeholder(".报告.pdf.icloud"), Some("报告.pdf"));
+        assert_eq!(icloud_placeholder(".icloud"), None);
+        assert_eq!(icloud_placeholder("a.icloud"), None);
+    }
+
+    #[test]
+    fn icloud_root_inside_library() {
+        let home = PathBuf::from("/Users/a");
+        let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs");
+        let blocked = vec![home.join("Library"), PathBuf::from("/Users/a/Documents/private")];
+        let roots = dedup_roots(vec![home.clone(), home.join("Documents"), icloud.clone()], &blocked);
+        assert_eq!(roots, vec![home.clone(), icloud.clone()]);
+        let f = PathFilter {
+            excluded_paths: blocked,
+            root_exceptions: vec![icloud.clone()],
+            excluded_names: vec![],
+            min_size: 1,
+            include_hidden: false,
+        };
+        assert!(f.allow_dir(&icloud.join("工作")));
+        assert!(!f.allow_dir(&home.join("Library/Caches")));
+        assert!(!f.allow_dir(&home.join("Documents/private")));
+        assert!(f.allow_path_chain(&icloud.join("工作/a.pdf"), &roots));
+        assert!(!f.allow_path_chain(&home.join("Library/x/a.pdf"), &roots));
     }
 
     #[test]

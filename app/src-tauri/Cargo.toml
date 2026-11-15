@@ -1,7 +1,7 @@
 [package]
 name = "lumen-app"
 description = "Lumen — find any file on your Mac, instantly"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 

@@ -25,6 +25,18 @@
 
 <br>
 
+## ✦ New in v0.7: Lumen from anywhere, iCloud Drive
+
+<p align="center">
+  <img src="docs/screenshots/icloud-en.jpg" alt="iCloud Drive files, even ones not downloaded" width="80%">
+</p>
+
+- **Raycast and Alfred** — a Raycast extension (`integrations/raycast`) and an Alfred workflow (`Lumen.alfredworkflow` on every release): `lf annual review` by name, pinyin or contents, `la snow videos from Hokkaido` by meaning. ↵ open, ⌘↵ reveal in Finder, ⇧ Quick Look.
+- **`lumen://` links** — `lumen://search?q=lease`, `lumen://ask?q=the lease I signed last year`, `lumen://quick?q=invoice` from Notes, a web page or a Shortcut's Open URL.
+- **Shortcuts** — Open URL `lumen://search?q=…`, or Run Shell Script `lumen --json search invoice` to hand results to the next action.
+- **The CLI ships in the app** — `Lumen.app/Contents/MacOS/lumen`; the Homebrew cask puts it on your PATH.
+- **iCloud Drive** — files in iCloud Drive are searchable, even ones not downloaded (marked “iCloud”). Lumen never downloads a file just to read or fingerprint it.
+
 ## ✦ New in v0.6: search by meaning, Homebrew
 
 <p align="center">

@@ -375,6 +375,7 @@ fn set_options(
     theme: Option<String>,
     auto_update: Option<bool>,
     semantic: Option<bool>,
+    include_icloud: Option<bool>,
 ) -> Res<Config> {
     if let Some(on) = launch_at_login {
         let al = app.autolaunch();
@@ -404,6 +405,9 @@ fn set_options(
         if let Some(v) = auto_update {
             cfg.auto_update = v;
         }
+        if let Some(v) = include_icloud {
+            cfg.include_icloud = v;
+        }
         if let Some(v) = semantic {
             cfg.semantic = v;
             use_semantic(v);
@@ -418,7 +422,7 @@ fn set_options(
         apply_theme(&app, &cfg.theme);
     }
     // Only the options that change what is indexed need a scan.
-    if content_search.is_some() || include_external.is_some() || ocr.is_some() || semantic == Some(true) {
+    if content_search.is_some() || include_external.is_some() || include_icloud.is_some() || ocr.is_some() || semantic == Some(true) {
         run_scan(&app, &state)?;
     }
     Ok(cfg)
@@ -500,6 +504,50 @@ fn show_in_main(app: AppHandle, query: String) {
         let _ = w.set_focus();
         let _ = w.emit("app://query", query);
     }
+}
+
+/// A lumen:// link that arrived before the window was ready to hear it.
+static PENDING_LINK: Mutex<Option<Link>> = Mutex::new(None);
+
+#[derive(Clone, Serialize)]
+struct Link {
+    /// "search" or "ask"
+    mode: String,
+    query: String,
+}
+
+/// lumen://search?q=… · lumen://ask?q=… · lumen://quick?q=… (Raycast,
+/// Alfred, Shortcuts' "Open URL", or a link in a note).
+fn open_link(app: &AppHandle, url: &tauri::Url) {
+    if url.scheme() != "lumen" {
+        return;
+    }
+    let host = url.host_str().unwrap_or("search").to_ascii_lowercase();
+    let query = url.query_pairs().find(|(k, _)| k == "q").map(|(_, v)| v.into_owned()).unwrap_or_default();
+    if host == "quick" {
+        if !app.get_webview_window("quick").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false) {
+            toggle_quick(app);
+        }
+        if let Some(w) = app.get_webview_window("quick") {
+            let _ = w.emit("app://query", query);
+        }
+        return;
+    }
+    let link = Link { mode: if host == "ask" { "ask".into() } else { "search".into() }, query };
+    *PENDING_LINK.lock().unwrap() = Some(link.clone());
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        // A running window takes it now (and clears it via take_link); a
+        // window still loading asks for it with take_link once it is ready.
+        let _ = w.emit("app://link", &link);
+    }
+}
+
+#[tauri::command]
+fn take_link() -> Option<Link> {
+    PENDING_LINK.lock().unwrap().take()
 }
 
 /// Change the summon shortcut. The old one stays if the new one is taken.
@@ -789,6 +837,7 @@ fn main() {
             install_update,
             quick_hide,
             show_in_main,
+            take_link,
             open_path,
             reveal,
             quick_look
@@ -800,6 +849,12 @@ fn main() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
                 toggle_main(_app);
+            }
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                for u in urls {
+                    open_link(_app, u);
+                }
             }
         });
 }

@@ -115,7 +115,7 @@ impl Index {
         let sizes: Vec<i64> = {
             let conn = self.conn();
             let mut stmt = conn.prepare(
-                "SELECT size FROM files WHERE size >= ?1 GROUP BY size HAVING count(*) > 1
+                "SELECT size FROM files WHERE size >= ?1 AND cloud = 0 GROUP BY size HAVING count(*) > 1
                  ORDER BY size DESC LIMIT ?2",
             )?;
             let v = stmt.query_map(params![min_size.max(1), (max_groups * 4) as i64], |r| r.get(0))?.flatten().collect();
@@ -125,7 +125,7 @@ impl Index {
         for size in sizes {
             let cands: Vec<(i64, String, Option<String>)> = {
                 let conn = self.conn();
-                let mut stmt = conn.prepare_cached("SELECT id, path, hash FROM files WHERE size = ?1")?;
+                let mut stmt = conn.prepare_cached("SELECT id, path, hash FROM files WHERE size = ?1 AND cloud = 0")?;
                 let v = stmt.query_map([size], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.flatten().collect();
                 v
             };

@@ -252,7 +252,7 @@ fn walk_parallel(
             let path = entry.path();
             let Some(kind) = filter.classify_file(path) else { return WalkState::Continue };
             let Ok(meta) = entry.metadata() else { return WalkState::Continue };
-            if meta.len() < filter.min_size {
+            if !filter.keep_size(path, &meta) {
                 return WalkState::Continue;
             }
             if let Some(f) = NewFile::from_path(path, kind, &meta) {
@@ -285,7 +285,7 @@ pub(crate) fn index_tree(conn: &mut rusqlite::Connection, dir: &Path, filter: &P
         }
         let Some(kind) = filter.classify_file(entry.path()) else { continue };
         let Ok(meta) = entry.metadata() else { continue };
-        if meta.len() < filter.min_size {
+        if !filter.keep_size(entry.path(), &meta) {
             continue;
         }
         if let Some(f) = NewFile::from_path(entry.path(), kind, &meta) {
@@ -320,7 +320,7 @@ pub(crate) fn apply_paths(
             }
             Ok(meta) if meta.is_file() => {
                 if let Some(kind) = filter.classify_file(p) {
-                    if meta.len() >= filter.min_size {
+                    if filter.keep_size(p, &meta) {
                         if let Some(f) = NewFile::from_path(p, kind, &meta) {
                             write_batch(conn, std::slice::from_ref(&f), gen)?;
                             upserted += 1;

@@ -25,6 +25,18 @@
 
 <br>
 
+## ✦ v0.7 新增：在哪儿都能叫出 Lumen · iCloud 云盘
+
+<p align="center">
+  <img src="docs/screenshots/icloud.jpg" alt="iCloud 云盘里没下载的文件也能搜到" width="80%">
+</p>
+
+- **Raycast 与 Alfred** — Raycast 扩展（`integrations/raycast`）和 Alfred 工作流（每个版本附带 `Lumen.alfredworkflow`）：`lf 年终总结` 按名字/拼音/正文找，`la 北海道的雪景` 按意思找；↵ 打开、⌘↵ 在 Finder 中显示、⇧ 快速查看。
+- **`lumen://` 链接** — `lumen://search?q=合同`、`lumen://ask?q=去年的租房合同`、`lumen://quick?q=发票`，在备忘录、网页或快捷指令的“打开 URL”里一点就搜。
+- **快捷指令** — “打开 URL：lumen://search?q=…”唤起 Lumen；或“运行 Shell 脚本：`lumen --json search 发票`”把结果交给后续动作。
+- **命令行随 App 安装** — `Lumen.app/Contents/MacOS/lumen`，用 Homebrew 安装时自动加入 PATH。
+- **iCloud 云盘** — 云盘里的文件（包括没下载到本机的）也能搜到，标注“iCloud”；Lumen 不会为了读取正文、查重而触发下载。
+
 ## ✦ v0.6 新增：按意思搜索 · Homebrew 安装
 
 <p align="center">

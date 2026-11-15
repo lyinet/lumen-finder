@@ -150,6 +150,7 @@ pub(crate) fn index_pending(
             "SELECT f.id, f.path, f.ext, f.size, f.mtime FROM files f
              LEFT JOIN content c ON c.id = f.id
              WHERE ((f.ext IN ({marks}) AND f.size <= ?1) {images})
+               AND f.cloud = 0
                AND (c.id IS NULL OR c.mtime <> f.mtime OR c.size <> f.size)
              ORDER BY f.ext IN ({ocr_marks}), f.mtime DESC"
         ))?;

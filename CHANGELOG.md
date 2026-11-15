@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.0 — unreleased
+
+- **Raycast extension** (`integrations/raycast`): Search Files and Search Files by Meaning, backed by `lumen --json`. Open, reveal, Quick Look, copy path, open with; iCloud / offline / relevance accessories.
+- **Alfred workflow** (`integrations/alfred`, attached to each release as `Lumen.alfredworkflow`): `lf` and `la` keywords via the new `lumen --alfred search|ask` Script Filter output. ⌘↵ reveals.
+- **`lumen://` URL scheme**: `search`, `ask` (meaning) and `quick` (the quick panel), each with `?q=`. Links that arrive while Lumen is launching are kept until the window is ready.
+- **The `lumen` CLI is bundled** at `Lumen.app/Contents/MacOS/lumen` and finds the embedding helper next to itself; the Homebrew cask links it onto PATH.
+- **iCloud Drive**: `~/Library/Mobile Documents/com~apple~CloudDocs` is scanned (Settings → Search powers → iCloud Drive) while the rest of ~/Library stays skipped. Files not on this Mac — `.name.icloud` placeholders (macOS ≤ 13) and dataless files (`SF_DATALESS`, macOS 14+, including Desktop & Documents in iCloud) — are indexed under their real name, marked “iCloud”, and never opened for content, OCR or duplicate fingerprints, so Lumen never triggers a download. Schema adds `files.cloud` in place.
+- CI builds the CLI for both architectures and checks that it and the `lumen` URL scheme are inside the bundle.
+
 ## v0.6.1 — 2026-11-16
 
 - **Chinese search by meaning**: when this Mac has no Chinese embedding model, the helper now asks macOS for Apple's on-demand Chinese language assets (NLContextualEmbedding, macOS 14+) and waits up to 3 minutes. Only Apple's model is downloaded; no file content leaves the Mac. Set `LUMEN_NO_ASSET_REQUEST=1` to opt out.

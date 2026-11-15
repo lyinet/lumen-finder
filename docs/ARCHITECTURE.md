@@ -123,6 +123,12 @@ The bigram index trades true substring matching inside Latin words (`venue`
 no longer finds `revenue`) for word/prefix matching, which is what people
 type anyway.
 
+## Integrations and iCloud (v0.7)
+
+- **CLI as the integration surface.** Raycast and Alfred shell out to the bundled `lumen` binary (`--json`, `--alfred`) rather than talking to the app: it opens the same SQLite index read-mostly (WAL), works when the app is not running, and keeps the integrations tiny. Semantic queries spawn the helper next to the binary.
+- **URL scheme** without a plugin: `CFBundleURLTypes` from `app/src-tauri/Info.plist` (merged by tauri build) and `RunEvent::Opened`. A cold-start link is parked in `PENDING_LINK` and fetched by the UI with `take_link` once it has listeners.
+- **iCloud.** The iCloud Drive root is an extra root inside a skipped location; `PathFilter.root_exceptions` lets the walk and the watcher enter it and nothing else under ~/Library, and `dedup_roots` keeps it even though the home root contains it. A file is “cloud” when it is a `.name.icloud` placeholder or has `SF_DATALESS` in `st_flags`; reading either would make `fileproviderd` download it, so content, OCR and duplicate queries all filter `cloud = 0`. Once downloaded, the placeholder path disappears (or the flag clears with an mtime/size-preserving rescan row) and the file joins the reading queue because it has no `content` row yet.
+
 ## Semantic search (v0.6, beta)
 
 - **Model**: Apple's `NLEmbedding.sentenceEmbedding` (NaturalLanguage, macOS 11+), called from the existing Swift helper as `lumen-ocr embed` (stdin `zh|en<TAB>text` lines, stdout one comma-separated vector per line). It ships with macOS: no model download, no network, no extra binary size. Apple has one model per language, so vectors are only compared within a model.

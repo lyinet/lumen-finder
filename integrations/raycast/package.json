@@ -1,0 +1,53 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "lumen",
+  "title": "Lumen",
+  "description": "Find any file on your Mac by name, pinyin, contents or meaning, with Lumen's local index.",
+  "icon": "icon.png",
+  "author": "lyinet",
+  "categories": [
+    "Productivity",
+    "System"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "search",
+      "title": "Search Files",
+      "subtitle": "Lumen",
+      "description": "Search by name, pinyin (nzzj), folder or the words inside documents.",
+      "mode": "view"
+    },
+    {
+      "name": "ask",
+      "title": "Search Files by Meaning",
+      "subtitle": "Lumen",
+      "description": "Describe a file (\"snow videos from Hokkaido\") and Lumen finds it.",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "lumenPath",
+      "title": "lumen binary",
+      "description": "Path to the lumen command-line tool.",
+      "type": "textfield",
+      "required": false,
+      "default": "/Applications/Lumen.app/Contents/MacOS/lumen"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.12.1",
+    "@raycast/utils": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.17",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.4.0"
+  },
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "typecheck": "tsc --noEmit"
+  }
+}

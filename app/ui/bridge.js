@@ -39,6 +39,7 @@ function realBridge() {
     quickResize: height => invoke('quick_resize', { height }),
     quickHide: () => invoke('quick_hide'),
     showInMain: query => invoke('show_in_main', { query }),
+    takeLink: () => invoke('take_link'),
     pickFolder: async () => tauri.dialog ? tauri.dialog.open({ directory: true, multiple: false }) : null,
     on: (event, cb) => listen(event, e => cb(e.payload)),
   }
@@ -96,6 +97,11 @@ function mockBridge() {
     const parent = '/Volumes/Passport/归档'
     files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 2.4e9, mtime: now - 86400 * 400, offline: true })
   }
+  // iCloud Drive files that are not downloaded (v0.7): kept, never read.
+  for (const [name, kind, ext] of [['季度预算-终版', 'spreadsheet', 'numbers'], ['2025 家庭旅行照片', 'archive', 'zip'], ['年终总结-定稿', 'presentation', 'key']]) {
+    const parent = `${HOME}/Library/Mobile Documents/com~apple~CloudDocs/工作`
+    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 0, mtime: now - 86400 * 21, cloud: true })
+  }
   // A few files that only match by meaning, for the v0.6 preview.
   for (const [name, kind, ext, folder, days] of [
     ['IMG_4471 札幌雪祭', 'image', 'heic', 'Pictures/导出', 330], ['DJI_0032', 'video', 'mp4', 'Movies/旅行/2025-01', 320],
@@ -135,7 +141,7 @@ function mockBridge() {
       const i = f.text.toLowerCase().indexOf(t), a = Math.max(0, i - 18)
       return (a ? '…' : '') + f.text.slice(a, i + t.length + 36) + (i + t.length + 36 < f.text.length ? '…' : '')
     }
-    const page = hits.slice(off, off + (req.limit || 60)).map(f => ({ ...f, offline: !!f.offline, snippet: snip(f), text: undefined }))
+    const page = hits.slice(off, off + (req.limit || 60)).map(f => ({ ...f, offline: !!f.offline, cloud: !!f.cloud, snippet: snip(f), text: undefined }))
     return { hits: page, total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
   }
 
@@ -168,7 +174,7 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.6.0',
+      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.7.0',
       semanticReady: true, semanticFiles: files.length,
     }),
     search: async req => query(req),
@@ -212,7 +218,7 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic', includeIcloud: 'include_icloud' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
@@ -230,9 +236,11 @@ function mockBridge() {
       return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
-    checkUpdate: async () => location.hash.includes('update') ? { version: '0.6.1', current: '0.6.0', notes: '' } : null,
+    checkUpdate: async () => location.hash.includes('update') ? { version: '0.7.0', current: '0.6.1', notes: '' } : null,
     installUpdate: async () => { for (let p = 0; p <= 1; p += 0.1) { emit('update-progress', p); await new Promise(r => setTimeout(r, 120)) } },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
+    // #link=ask:北海道 previews a lumen:// link arriving.
+    takeLink: async () => { const m = location.hash.match(/^#link=(search|ask):(.*)$/); return m ? { mode: m[1], query: decodeURIComponent(m[2]) } : null },
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},
     setRoots: async roots => ({ roots }),

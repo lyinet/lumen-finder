@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS files (
     first_gen   INTEGER NOT NULL,
     seen_gen    INTEGER NOT NULL,
     changed_gen INTEGER NOT NULL,
-    hash        TEXT
+    hash        TEXT,
+    cloud       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS files_kind_mtime ON files(kind, mtime DESC);
 CREATE INDEX IF NOT EXISTS files_mtime ON files(mtime DESC);
@@ -98,8 +99,8 @@ END;
 
 pub(crate) const UPSERT: &str = r#"
 INSERT INTO files (path, name, name_py, parent, ext, kind, size, mtime, ctime,
-                   first_gen, seen_gen, changed_gen)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)
+                   first_gen, seen_gen, changed_gen, cloud)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10, ?11)
 ON CONFLICT(path) DO UPDATE SET
     seen_gen    = excluded.seen_gen,
     changed_gen = CASE WHEN files.size <> excluded.size OR files.mtime <> excluded.mtime
@@ -108,7 +109,8 @@ ON CONFLICT(path) DO UPDATE SET
                        THEN NULL ELSE files.hash END,
     size        = excluded.size,
     mtime       = excluded.mtime,
-    kind        = excluded.kind
+    kind        = excluded.kind,
+    cloud       = excluded.cloud
 "#;
 
 /// A file as the index knows it.
@@ -124,6 +126,8 @@ pub struct FileRecord {
     pub mtime: i64,
     /// On an external drive that is not plugged in right now.
     pub offline: bool,
+    /// In iCloud Drive and not downloaded to this Mac.
+    pub cloud: bool,
     /// Where the query matched inside the file, when it matched the words
     /// rather than the name.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,7 +135,7 @@ pub struct FileRecord {
 }
 
 impl FileRecord {
-    pub(crate) const COLS: &'static str = "f.id, f.path, f.name, f.parent, f.ext, f.kind, f.size, f.mtime";
+    pub(crate) const COLS: &'static str = "f.id, f.path, f.name, f.parent, f.ext, f.kind, f.size, f.mtime, f.cloud";
 
     pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
         let path: String = r.get(1)?;
@@ -146,6 +150,7 @@ impl FileRecord {
             kind: Kind::from_i64(r.get(5)?).unwrap_or(Kind::Document),
             size: r.get(6)?,
             mtime: r.get(7)?,
+            cloud: r.get::<_, i64>(8)? != 0,
         })
     }
 }
@@ -162,16 +167,22 @@ pub struct NewFile {
     pub size: i64,
     pub mtime: i64,
     pub ctime: i64,
+    pub cloud: bool,
 }
 
 impl NewFile {
     pub fn from_path(path: &Path, kind: Kind, meta: &std::fs::Metadata) -> Option<NewFile> {
-        let name = path.file_name()?.to_string_lossy().into_owned();
+        let file_name = path.file_name()?.to_string_lossy().into_owned();
+        let placeholder = crate::config::icloud_placeholder(&file_name).map(str::to_string);
+        let cloud = placeholder.is_some() || is_dataless(meta);
+        let name = placeholder.unwrap_or(file_name);
         let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        let ext = path
+        let ext = Path::new(&name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
+        // A placeholder's own size is a few hundred bytes of plist, not the file's.
+        let size = if cloud && !is_dataless(meta) { 0 } else { meta.len() as i64 };
         let mtime = meta.modified().ok().map(unix).unwrap_or(0);
         let ctime = meta.created().ok().map(unix).unwrap_or(mtime);
         Some(NewFile {
@@ -181,9 +192,10 @@ impl NewFile {
             parent,
             ext,
             kind,
-            size: meta.len() as i64,
+            size,
             mtime,
             ctime,
+            cloud,
         })
     }
 
@@ -198,9 +210,30 @@ impl NewFile {
             self.size,
             self.mtime,
             self.ctime,
-            gen
+            gen,
+            self.cloud as i64
         ])
     }
+}
+
+/// Not downloaded from iCloud: a ".name.icloud" placeholder (macOS 13 and
+/// earlier) or a dataless file (macOS 14+, SF_DATALESS). Reading one would
+/// make macOS download it, so Lumen never opens these.
+pub fn is_cloud(path: &Path, meta: &std::fs::Metadata) -> bool {
+    is_dataless(meta)
+        || path.file_name().and_then(|n| n.to_str()).and_then(crate::config::icloud_placeholder).is_some()
+}
+
+#[cfg(target_os = "macos")]
+fn is_dataless(meta: &std::fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const SF_DATALESS: u32 = 0x4000_0000;
+    meta.st_flags() & SF_DATALESS != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_dataless(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 pub(crate) fn unix(t: std::time::SystemTime) -> i64 {
@@ -243,6 +276,13 @@ impl Index {
             conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
         }
         conn.execute_batch(SCHEMA).context("creating schema")?;
+        // v0.7: files.cloud (iCloud files not on this Mac).
+        let has_cloud: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('files') WHERE name = 'cloud'")?
+            .exists([])?;
+        if !has_cloud {
+            conn.execute_batch("ALTER TABLE files ADD COLUMN cloud INTEGER NOT NULL DEFAULT 0;")?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Index { path, conn: Mutex::new(conn) })
     }

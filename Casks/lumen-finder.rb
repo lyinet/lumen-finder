@@ -23,6 +23,7 @@ cask "lumen-finder" do
   depends_on macos: ">= :big_sur"
 
   app "Lumen.app"
+  binary "#{appdir}/Lumen.app/Contents/MacOS/lumen"
 
   # Until releases are notarized with a Developer ID, clear the download
   # quarantine so Gatekeeper does not block the first launch.
