@@ -10,3 +10,5 @@
 - 中文语义搜索：缺模型时助手经 NLContextualEmbedding.requestAssets 请 macOS 下载苹果中文语言资源（最多等 180s，`LUMEN_NO_ASSET_REQUEST=1` 可关）；每次嵌入前读 `embed-info`，按语言存签名（meta `vec_sig_zh/en`），变化时只重建该语言向量。
 - 隐私文案改为说明“一次性下载语言模型”。用户首次在真机验证 0.6.0 → 0.6.1 应用内更新。
 - 下一大版本计划 v0.7（生态与集成），见 docs/PRODUCT.md。
+- 2026-11-16：cbb5775 的 CI 未启动——GitHub 提示账户付款失败或需提高 spending limit（仓库为 private，macOS 分钟按 10 倍计）。v0.6.1 tag 尚未打。
+- 发现：仓库 private 时，Release 资产（latest.json、DMG）与 brew tap 对外不可访问，应用内更新和 Homebrew 安装在用户机器上都会失败。待用户决定：改为 public（同时解决 CI 计费），或修复账单并另找公开发布渠道。
