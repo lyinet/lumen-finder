@@ -364,3 +364,45 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 .col-head .back { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; color: var(--text-2); background: var(--panel); border: 1px solid var(--line); }
 .col-head .back:hover { color: var(--text); background: var(--panel-2); }
 .col-head .back svg { font-size: 16px; }
+
+/* ---- v0.5 timeline ---------------------------------------------------- */
+.tl { position: relative; padding-left: 18px; }
+.tl::before { content: ''; position: absolute; left: 5px; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: linear-gradient(var(--accent), transparent); opacity: .35; }
+.tl-year { display: flex; align-items: baseline; gap: 12px; margin: 18px 0 8px -18px; padding-left: 18px; }
+.tl-year:first-child { margin-top: 2px; }
+.tl-year span { font-size: 22px; font-weight: 750; letter-spacing: -.02em; }
+.tl-year b { font-weight: 500; color: var(--text-3); font-size: 12px; }
+.tl-row { position: relative; display: grid; grid-template-columns: 54px minmax(120px, 1fr) minmax(0, 1.1fr) 72px 70px; align-items: center; gap: 14px; width: 100%; padding: 10px 14px; margin-bottom: 4px; border-radius: 12px; border: 1px solid transparent; background: transparent; text-align: left; color: var(--text); animation: rowIn .45s var(--spring) both; transition: background .2s, border-color .2s, transform .25s var(--spring); }
+.tl-row:hover { background: var(--panel); border-color: var(--line); transform: translateX(2px); }
+.tl-row .dot { position: absolute; left: -17px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 35%, #14122a); border: 2px solid var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent); }
+.tl-m { font-weight: 650; font-size: 14px; }
+.tl-bar { height: 10px; border-radius: 6px; background: var(--panel-2); overflow: hidden; }
+.tl-fill { display: flex; height: 100%; width: 0; border-radius: 6px; overflow: hidden; transition: width 1s var(--spring); }
+.tl-fill b { background: var(--c); }
+.tl-kinds { display: flex; gap: 12px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 11.5px; color: var(--text-2); }
+.tl-kinds span { display: inline-flex; align-items: center; gap: 5px; }
+.tl-kinds i { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+.tl-n { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tl-s { text-align: right; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tl-chips { margin-top: 0; }
+@media (max-width: 900px) { .tl-row { grid-template-columns: 54px 1fr 64px 64px; } .tl-kinds { display: none; } }
+
+/* ---- v0.5 share card -------------------------------------------------- */
+.head .btn { flex: none; }
+.modal-bg { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(8, 7, 18, .55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); animation: fadeIn .2s both; }
+.modal-bg.out { animation: fadeOut .18s both; }
+.modal { padding: 18px; border-radius: 20px; background: var(--panel-2); border: 1px solid var(--line-2); box-shadow: 0 40px 80px -30px rgba(0,0,0,.7); animation: pop .4s var(--spring) both; }
+.modal.share img { display: block; height: min(64vh, 560px); aspect-ratio: 3 / 4; border-radius: 14px; box-shadow: 0 20px 50px -20px rgba(0,0,0,.6); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+@keyframes fadeIn { from { opacity: 0; } }
+@keyframes fadeOut { to { opacity: 0; } }
+
+/* ---- v0.5 update banner ----------------------------------------------- */
+.upd-banner { position: fixed; z-index: 50; right: 22px; top: 18px; display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line-2); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: 0 24px 50px -24px rgba(0,0,0,.7); animation: toastIn .5s var(--spring) both; }
+.upd-banner.out { animation: toastOut .3s var(--ease) both; }
+.upd-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--accent-grad); color: #fff; }
+.upd-icon svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+.upd-txt { display: flex; flex-direction: column; min-width: 150px; }
+.upd-txt b { font-weight: 650; }
+.upd-txt span { font-size: 11.5px; color: var(--text-3); }
+.upd-txt span:empty { display: none; }

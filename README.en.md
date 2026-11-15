@@ -25,6 +25,12 @@
 
 <br>
 
+## ✦ New in v0.5: timeline, share card, in-app updates
+
+- **Timeline** — every month of your files at a glance, with what each month was made of; open a month and filter by type.
+- **Share card** — one click on Insights draws a portrait card of your Mac in files, saved to the Desktop.
+- **In-app updates** — a banner when a new version ships; one click downloads, verifies the signature and relaunches. Nothing installs on its own, and checks can be switched off.
+
 ## ✦ New in v0.4: smart collections + text in images
 
 - **Smart collections** — invoices & receipts, contracts, IDs, screenshots and résumés gather themselves from wherever they live.
@@ -96,7 +102,7 @@ System folders, Library, apps, `.app` / Photos packages, `node_modules`, `.git`,
 <td valign="top">
 
 ### 🔒 Fully offline
-The index never leaves your Mac. No network, no uploads, no telemetry.
+The index never leaves your Mac. No uploads, no telemetry; the only request is an update check you can switch off.
 
 </td>
 </tr>

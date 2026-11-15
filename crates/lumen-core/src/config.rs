@@ -31,6 +31,8 @@ pub struct Config {
     pub launch_at_login: bool,
     /// "auto" follows macOS, or "light" / "dark".
     pub theme: String,
+    /// Look for a new version on GitHub Releases shortly after launch.
+    pub auto_update: bool,
 }
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -180,6 +182,7 @@ impl Default for Config {
             quick_panel: true,
             launch_at_login: false,
             theme: "auto".to_string(),
+            auto_update: true,
         }
     }
 }

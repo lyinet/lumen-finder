@@ -30,6 +30,11 @@ function realBridge() {
     openFdaSettings: () => invoke('open_fda_settings'),
     collections: () => invoke('collections'),
     collection: (id, limit) => invoke('collection', { id, limit }),
+    timeline: () => invoke('timeline'),
+    month: (month, kind, limit) => invoke('month', { month, kind: kind || null, limit }),
+    saveShareCard: png => invoke('save_share_card', { png: Array.from(png) }),
+    checkUpdate: () => invoke('check_update'),
+    installUpdate: () => invoke('install_update'),
     quickResize: height => invoke('quick_resize', { height }),
     quickHide: () => invoke('quick_hide'),
     showInMain: query => invoke('show_in_main', { query }),
@@ -129,7 +134,7 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'),
+      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.5.0',
     }),
     search: async req => query(req),
     overview: async () => {
@@ -172,12 +177,26 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
     collections: async () => COLS.map(([id, re]) => { const m = files.filter(f => re.test(f.name)); return { id, files: m.length, bytes: m.reduce((a, f) => a + f.size, 0), latest: Math.max(0, ...m.map(f => f.mtime)) } }),
     collection: async id => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime) },
+    timeline: async () => {
+      const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
+      const by = {}
+      files.forEach(f => { const m = by[ym(f.mtime)] ||= { month: ym(f.mtime), files: 0, bytes: 0, k: {} }; m.files += 37; m.bytes += f.size * 37; m.k[f.kind] = (m.k[f.kind] || 0) + 37 })
+      return Object.values(by).sort((a, b) => b.month.localeCompare(a.month))
+        .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([kind, files]) => ({ kind, files })) }))
+    },
+    month: async (month, kind) => {
+      const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
+      return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
+    },
+    saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
+    checkUpdate: async () => location.hash.includes('update') ? { version: '0.5.1', current: '0.5.0', notes: '' } : null,
+    installUpdate: async () => { for (let p = 0; p <= 1; p += 0.1) { emit('update-progress', p); await new Promise(r => setTimeout(r, 120)) } },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},

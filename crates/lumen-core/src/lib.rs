@@ -15,6 +15,7 @@ pub mod insights;
 pub mod kind;
 pub mod scanner;
 pub mod search;
+pub mod timeline;
 pub mod watcher;
 
 pub use config::Config;
@@ -25,6 +26,7 @@ pub use insights::{DuplicateGroup, KindStat, Overview};
 pub use kind::Kind;
 pub use scanner::{scan, ScanPhase, ScanProgress, ScanReport};
 pub use search::{SearchRequest, SearchResponse, Sort};
+pub use timeline::{KindCount, MonthStat};
 pub use watcher::{ChangeBatch, Watcher};
 
 /// Pinyin search key for a file name: full syllables then initials, so

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0 — 2026-11-15
+
+- **Timeline** (sidebar, ⌘4): files grouped by the month they last changed, in local time, with the top kinds per month as a coloured bar; a month opens as a list with kind chips. Engine: `Index::timeline()` / `Index::month()`.
+- **Share card**: Insights → Share card draws a 1080×1440 PNG (file count, total size, kind mix, most scattered kind, forgotten files, files touched this week) and saves it to the Desktop.
+- **In-app updates** via tauri-plugin-updater: checks `latest.json` on GitHub Releases a minute after launch (Settings → Check for updates, on by default), shows a banner, downloads and verifies the minisign signature, then relaunches. Installs only on click.
+- CI signs the update bundle (`TAURI_SIGNING_PRIVATE_KEY` secret) and publishes `Lumen_universal.app.tar.gz`, its `.sig` and `latest.json` with each tagged release.
+- Navigation shortcuts are now ⌘1–9. Privacy copy updated: the update check is the only network request.
+
 ## v0.4.0 — 2026-11-15
 
 - **Smart collections** (new sidebar page, ⌘3): invoices & receipts, contracts, IDs, screenshots, résumés. Each is a rule over the file name and the words inside documents, PDFs and images; counts, size and last change per collection, and a full list on click.

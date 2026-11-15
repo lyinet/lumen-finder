@@ -7,7 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use lumen_core::{
-    index_content, scan, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Overview,
+    index_content, scan, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Kind, MonthStat, Overview,
     SearchRequest, SearchResponse, Watcher,
 };
 use serde::Serialize;
@@ -20,6 +20,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_updater::UpdaterExt;
 
 struct AppState {
     index: Arc<Index>,
@@ -50,10 +51,11 @@ struct Snapshot {
     /// Full Disk Access granted (macOS). Without it every protected folder
     /// asks separately and some (Mail downloads, iCloud) stay hidden.
     full_disk_access: bool,
+    version: String,
 }
 
 #[tauri::command]
-fn snapshot(state: State<AppState>) -> Res<Snapshot> {
+fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
     let status = state.index.status().map_err(err)?;
     Ok(Snapshot {
         first_run: status.generation == 0,
@@ -63,6 +65,7 @@ fn snapshot(state: State<AppState>) -> Res<Snapshot> {
         home: lumen_home(),
         reading: state.reading.load(Ordering::Relaxed),
         full_disk_access: has_full_disk_access(),
+        version: app.package_info().version.to_string(),
     })
 }
 
@@ -239,6 +242,68 @@ fn collection(state: State<AppState>, id: String, limit: Option<usize>, offset: 
     state.index.collection(&id, limit.unwrap_or(200), offset.unwrap_or(0)).map_err(err)
 }
 
+/// Months that have files, newest first.
+#[tauri::command]
+fn timeline(state: State<AppState>) -> Res<Vec<MonthStat>> {
+    state.index.timeline(240).map_err(err)
+}
+
+#[tauri::command]
+fn month(state: State<AppState>, month: String, kind: Option<Kind>, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
+    state.index.month(&month, kind, limit.unwrap_or(300), offset.unwrap_or(0)).map_err(err)
+}
+
+/// Save the share card PNG to the Desktop and show it in Finder.
+#[tauri::command]
+fn save_share_card(png: Vec<u8>) -> Res<String> {
+    if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" || png.len() > 20 << 20 {
+        return Err("not a PNG".into());
+    }
+    let home = std::env::var("HOME").map_err(err)?;
+    let desk = Path::new(&home).join("Desktop");
+    let dir = if desk.is_dir() { desk } else { PathBuf::from(&home) };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let path = dir.join(format!("Lumen-{stamp}.png"));
+    std::fs::write(&path, png).map_err(err)?;
+    let _ = Command::new("open").arg("-R").arg(&path).spawn();
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[derive(Serialize, Clone)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    notes: String,
+}
+
+/// Ask GitHub Releases whether a newer Lumen exists (signed latest.json).
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Res<Option<UpdateInfo>> {
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    Ok(update.map(|u| UpdateInfo { version: u.version.clone(), current: u.current_version.clone(), notes: u.body.clone().unwrap_or_default() }))
+}
+
+/// Download, verify the signature, replace the app and relaunch.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Res<()> {
+    let Some(update) = app.updater().map_err(err)?.check().await.map_err(err)? else { return Ok(()) };
+    let app2 = app.clone();
+    let mut got: usize = 0;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                got += chunk;
+                if let Some(t) = total {
+                    let _ = app2.emit("update-progress", (got as f64 / t as f64).min(1.0));
+                }
+            },
+            || {},
+        )
+        .await
+        .map_err(err)?;
+    app.restart();
+}
+
 /// The Vision OCR helper ships next to the app binary (Contents/MacOS).
 fn use_ocr(on: bool) {
     let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("lumen-ocr")));
@@ -256,6 +321,7 @@ fn set_options(
     quick_panel: Option<bool>,
     launch_at_login: Option<bool>,
     theme: Option<String>,
+    auto_update: Option<bool>,
 ) -> Res<Config> {
     if let Some(on) = launch_at_login {
         let al = app.autolaunch();
@@ -281,6 +347,9 @@ fn set_options(
         }
         if let Some(v) = &theme {
             cfg.theme = v.clone();
+        }
+        if let Some(v) = auto_update {
+            cfg.auto_update = v;
         }
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
@@ -542,6 +611,7 @@ fn sys_locale_is_zh() -> bool {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -594,6 +664,18 @@ fn main() {
                 log::warn!("menu bar icon unavailable: {e}");
             }
 
+            // Quietly look for a new version a minute after launch; the UI
+            // shows a banner, nothing installs without a click.
+            if app.state::<AppState>().config.lock().unwrap().auto_update {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    if let Ok(Some(info)) = tauri::async_runtime::block_on(check_update(handle.clone())) {
+                        let _ = handle.emit("update-available", info);
+                    }
+                });
+            }
+
             if had_index {
                 // Returning user: watch live, and catch up on whatever changed
                 // while Lumen was closed with a quiet incremental scan.
@@ -637,6 +719,11 @@ fn main() {
             quick_resize,
             collections,
             collection,
+            timeline,
+            month,
+            save_share_card,
+            check_update,
+            install_update,
             quick_hide,
             show_in_main,
             open_path,

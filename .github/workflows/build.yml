@@ -53,6 +53,9 @@ jobs:
           NOTARY_ID: ${{ secrets.APPLE_ID }}
           NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Signs the in-app update (independent of Apple's Developer ID).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         # Without a Developer ID certificate in the repo secrets, the app is
         # ad-hoc signed (runs after right-click → Open). An empty
         # APPLE_CERTIFICATE makes Tauri fail, so pass it only when it is set.
@@ -64,7 +67,30 @@ jobs:
           else
             export APPLE_SIGNING_IDENTITY="-"
           fi
-          cargo tauri build --target universal-apple-darwin
+          extra=()
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            extra=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          fi
+          cargo tauri build --target universal-apple-darwin "${extra[@]}"
+      - name: Update manifest (latest.json)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          B=app/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          [ -f "$B/Lumen.app.tar.gz.sig" ] || { echo "no updater signature, skipping"; exit 0; }
+          VER=${GITHUB_REF_NAME#v}
+          mv "$B/Lumen.app.tar.gz" "$B/Lumen_universal.app.tar.gz"
+          mv "$B/Lumen.app.tar.gz.sig" "$B/Lumen_universal.app.tar.gz.sig"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Lumen_universal.app.tar.gz"
+          python3 - "$VER" "$URL" "$B/Lumen_universal.app.tar.gz.sig" > "$B/latest.json" <<'PY'
+          import json, sys, datetime
+          ver, url, sig = sys.argv[1], sys.argv[2], open(sys.argv[3]).read().strip()
+          p = {"signature": sig, "url": url}
+          print(json.dumps({"version": ver, "notes": f"Lumen {ver}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": {"darwin-aarch64": p, "darwin-x86_64": p, "darwin-universal": p}}, indent=2))
+          PY
+          cat "$B/latest.json"
       - uses: actions/upload-artifact@v4
         with:
           name: Lumen-macos-universal
@@ -73,5 +99,10 @@ jobs:
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          files: |
+            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Lumen_universal.app.tar.gz
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Lumen_universal.app.tar.gz.sig
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/latest.json
+          fail_on_unmatched_files: false
           generate_release_notes: true

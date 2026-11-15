@@ -38,6 +38,7 @@ const NAV = [
   ['search', ICON.search, () => T.nav_search],
   ['recent', ICON.recent, () => T.nav_recent],
   ['collections', ICON.collections, () => T.nav_collections],
+  ['timeline', ICON.timeline, () => T.nav_timeline],
   ['insights', ICON.insights, () => T.nav_insights],
   'sep',
   ['dupes', ICON.dupes, () => T.nav_dupes],
@@ -65,13 +66,14 @@ function movePill() {
   if (on && pill) pill.style.transform = `translateY(${on.offsetTop}px)`
 }
 function go(view) {
-  if (state.view === view && view !== 'search' && !(view === 'collections' && state.collection)) return
+  if (state.view === view && view !== 'search' && !(view === 'collections' && state.collection) && !(view === 'timeline' && state.month)) return
   if (view === 'collections' && state.view === 'collections') state.collection = null
+  if (view === 'timeline' && state.view === 'timeline') state.month = null
   state.view = view; movePill(); render()
 }
 
 // ------------------------------------------------------------ views ------
-const VIEWS = { collections: viewCollections, search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
+const VIEWS = { timeline: viewTimeline, collections: viewCollections, search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
 function render() {
   const v = $('#view'); v.innerHTML = ''; v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter')
   VIEWS[state.view](v)
@@ -235,11 +237,113 @@ async function viewCollection(v, id) {
   $('#list', sc).innerHTML = items.map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">${T.col_none}</div>`
 }
 
+// ---- timeline
+async function viewTimeline(v) {
+  if (state.month) return viewMonth(v, state.month)
+  v.append(h(`<div class="head"><div><h1>${T.tl_title}</h1><p>${T.tl_sub}</p></div></div>`))
+  const sc = h('<div class="scroll"></div>'); v.append(sc)
+  const months = await api.timeline()
+  if (!months.length) { sc.append(h(`<div class="empty" style="padding:60px">${T.tl_empty}</div>`)); return }
+  const max = Math.max(...months.map(m => m.files), 1)
+  const tl = h('<div class="tl"></div>'); sc.append(tl)
+  let year = null, i = 0
+  for (const m of months) {
+    const y = m.month.slice(0, 4)
+    if (y !== year) { year = y; tl.append(h(`<div class="tl-year"><span>${T.tl_year(y)}</span><b>${T.files(fmt(months.filter(x => x.month.startsWith(y)).reduce((a, x) => a + x.files, 0)))}</b></div>`)) }
+    const total = m.kinds.reduce((a, k) => a + k.files, 0) || 1
+    const r = h(`<button class="tl-row" style="animation-delay:${Math.min(i++, 20) * 22}ms"><i class="dot"></i>
+      <div class="tl-m">${T.tl_month(m.month)}</div>
+      <div class="tl-bar"><div class="tl-fill" data-w="${(Math.max(m.files / max, 0.02) * 100).toFixed(1)}">${m.kinds.map(k => `<b style="--c:${kc(k.kind)};flex:${k.files / total}"></b>`).join('')}</div></div>
+      <div class="tl-kinds">${m.kinds.slice(0, 3).map(k => `<span style="--c:${kc(k.kind)}"><i></i>${T.kind[k.kind]} ${fmt(k.files)}</span>`).join('')}</div>
+      <div class="tl-n">${fmt(m.files)}</div><div class="tl-s">${bytes(m.bytes)}</div></button>`)
+    r.onclick = () => { state.month = m.month; state.monthKind = null; render() }
+    tl.append(r)
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => sc.querySelectorAll('[data-w]').forEach(b => b.style.width = b.dataset.w + '%')))
+}
+async function viewMonth(v, month) {
+  const head = h(`<div class="head"><div class="col-head" style="--c:var(--accent)"><button class="back">${ICON.back}</button><div class="col-icon sm">${ICON.timeline}</div>
+    <div><h1>${T.tl_month_full(month)}</h1><p id="col-count"></p></div></div></div>`)
+  $('.back', head).onclick = () => { state.month = null; render() }
+  v.append(head)
+  const chips = h('<div class="chips tl-chips"></div>'); v.append(chips)
+  const sc = h('<div class="scroll"><div class="list" id="list"></div></div>'); v.append(sc)
+  bindRows(sc)
+  const all = await api.month(month, null, 1000)
+  const counts = {}; all.forEach(f => counts[f.kind] = (counts[f.kind] || 0) + 1)
+  const draw = () => {
+    const items = state.monthKind ? all.filter(f => f.kind === state.monthKind) : all
+    $('#col-count').textContent = T.files(fmt(items.length))
+    $('#list', sc).innerHTML = items.slice(0, 400).map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">—</div>`
+    chips.innerHTML = [`<button class="chip ${state.monthKind ? '' : 'on'}" data-k="">${T.all} <b>${fmt(all.length)}</b></button>`,
+      ...KINDS.filter(k => counts[k]).map(k => `<button class="chip ${state.monthKind === k ? 'on' : ''}" data-k="${k}" style="--c:${kc(k)}"><i></i>${T.kind[k]} <b>${fmt(counts[k])}</b></button>`)].join('')
+    chips.querySelectorAll('button').forEach(b => b.onclick = () => { state.monthKind = b.dataset.k || null; draw() })
+  }
+  draw()
+}
+
+// ---- share card: a picture of "your Mac in files" for WeChat / Xiaohongshu
+async function shareCard(ov, totalFiles, totalBytes) {
+  const W = 1080, H = 1440, c = document.createElement('canvas'); c.width = W; c.height = H
+  const g = c.getContext('2d'), css = getComputedStyle(document.documentElement)
+  const color = k => css.getPropertyValue(`--k-${k}`).trim() || '#8b7cf6'
+  const bg = g.createLinearGradient(0, 0, W, H); bg.addColorStop(0, '#1b1640'); bg.addColorStop(0.55, '#0f1424'); bg.addColorStop(1, '#2a1426')
+  g.fillStyle = bg; g.fillRect(0, 0, W, H)
+  const glow = (x, y, r, col) => { const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, col); gr.addColorStop(1, 'transparent'); g.fillStyle = gr; g.fillRect(0, 0, W, H) }
+  glow(200, 160, 620, 'rgba(139,124,246,.45)'); glow(980, 1300, 700, 'rgba(244,114,182,.22)'); glow(900, 420, 420, 'rgba(56,189,248,.16)')
+  const font = (w, px) => `${w} ${px}px -apple-system, "PingFang SC", "PingFang TC", "Helvetica Neue", sans-serif`
+  g.fillStyle = 'rgba(255,255,255,.65)'; g.font = font(600, 40); g.fillText(T.share_title, 90, 150)
+  g.fillStyle = '#fff'; g.font = font(800, 200); g.fillText(fmt(totalFiles), 84, 380)
+  g.fillStyle = 'rgba(255,255,255,.8)'; g.font = font(600, 46)
+  g.fillText(`${T.share_files} · ${bytes(totalBytes)}`, 90, 460)
+  // stacked bar by kind
+  let x = 90; const bw = W - 180, top = 540
+  g.save(); g.beginPath(); g.roundRect(90, top, bw, 34, 17); g.clip()
+  for (const k of ov.kinds) { const w = bw * k.bytes / (totalBytes || 1); g.fillStyle = color(k.kind); g.fillRect(x, top, w + 1, 34); x += w }
+  g.restore()
+  // legend: top kinds with counts
+  ov.kinds.slice(0, 6).forEach((k, i) => {
+    const cx = 90 + (i % 2) * 460, cy = 680 + Math.floor(i / 2) * 92
+    g.fillStyle = color(k.kind); g.beginPath(); g.arc(cx + 14, cy - 14, 14, 0, 7); g.fill()
+    g.fillStyle = '#fff'; g.font = font(700, 42); g.fillText(T.kind[k.kind], cx + 46, cy)
+    g.fillStyle = 'rgba(255,255,255,.55)'; g.font = font(500, 34); g.fillText(fmt(k.files), cx + 46 + g.measureText(T.kind[k.kind]).width * 1.25 + 16, cy)
+  })
+  // facts
+  const facts = []
+  const sc = [...ov.kinds].sort((a, b) => b.folders - a.folders)[0]
+  if (sc) facts.push(T.share_scatter(T.kind[sc.kind], fmt(sc.folders)))
+  if (ov.forgotten_files) facts.push(T.share_forgot(fmt(ov.forgotten_files)) + ' · ' + bytes(ov.forgotten_bytes))
+  if (ov.changed_7d) facts.push(T.share_week(fmt(ov.changed_7d)))
+  facts.forEach((f, i) => {
+    const y = 1010 + i * 110
+    g.fillStyle = 'rgba(255,255,255,.08)'; g.beginPath(); g.roundRect(90, y - 66, W - 180, 90, 24); g.fill()
+    g.fillStyle = '#fff'; g.font = font(600, 38); g.fillText(f, 130, y - 8)
+  })
+  g.fillStyle = 'rgba(255,255,255,.5)'; g.font = font(500, 32); g.fillText(T.share_foot, 90, H - 90)
+  g.fillStyle = 'rgba(255,255,255,.85)'; g.font = font(800, 40); const lw = g.measureText('Lumen').width; g.fillText('Lumen', W - 90 - lw, H - 90)
+  return c
+}
+async function openShare(ov, totalFiles, totalBytes) {
+  const canvas = await shareCard(ov, totalFiles, totalBytes)
+  const m = h(`<div class="modal-bg"><div class="modal share"><img alt=""><div class="modal-actions">
+    <button class="btn" data-a="close">${T.share_close}</button><button class="btn primary" data-a="save">${ICON.share}${T.share_save}</button></div></div></div>`)
+  $('img', m).src = canvas.toDataURL('image/png')
+  const close = () => { m.classList.add('out'); setTimeout(() => m.remove(), 180) }
+  m.onclick = e => { if (e.target === m || e.target.dataset.a === 'close') close() }
+  $('[data-a="save"]', m).onclick = async () => {
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/png'))
+    try { await api.saveShareCard(new Uint8Array(await blob.arrayBuffer())); toast(T.share_saved); close() } catch (e) { toast(String(e)) }
+  }
+  document.body.append(m)
+}
+
 // ---- insights
 async function viewInsights(v) {
-  v.append(h(`<div class="head"><div><h1>${T.ins_title}</h1><p>${T.ins_sub}</p></div></div>`))
+  const head = h(`<div class="head"><div><h1>${T.ins_title}</h1><p>${T.ins_sub}</p></div><button class="btn" id="share">${ICON.share}${T.share_btn}</button></div>`)
+  v.append(head)
   const sc = h('<div class="scroll"></div>'); v.append(sc)
   const ov = await api.overview()
+  $('#share', head).onclick = () => openShare(ov, ov.kinds.reduce((a, k) => a + k.files, 0), ov.kinds.reduce((a, k) => a + k.bytes, 0))
   const totalFiles = ov.kinds.reduce((a, k) => a + k.files, 0), totalBytes = ov.kinds.reduce((a, k) => a + k.bytes, 0)
   const scattered = [...ov.kinds].sort((a, b) => b.folders - a.folders)[0]
   const hero = h(`<div class="card hero-card" style="--c:var(--accent)"><div class="glow"></div>
@@ -389,6 +493,18 @@ async function viewSettings(v) {
     <button class="hotkey" id="hk">${keycaps(snap.config.hotkey || 'Alt+Space')}</button></div>`)
   form.append(hk)
   recordHotkey($('#hk', hk))
+  const upd = h(`<div class="field"><h3>${T.set_update}</h3>
+    ${toggleRow('update', T.set_update, T.set_update_p(snap.version || ''), snap.config.auto_update !== false)}
+    <button class="btn" id="upd-check">${T.set_update_check}</button></div>`)
+  $('h3', upd).remove()
+  form.append(upd)
+  $('.switch', upd).onclick = async e => {
+    const sw = e.currentTarget, on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
+    const cfg = await api.setOptions({ autoUpdate: on }); state.snapshot.config = { ...state.snapshot.config, ...cfg }
+  }
+  $('#upd-check', upd).onclick = async () => {
+    try { const u = await api.checkUpdate(); u ? updateBanner(u) : toast(T.upd_none) } catch { toast(T.upd_fail) }
+  }
   form.append(h(`<div class="field"><h3>${T.set_privacy}</h3><p>${T.set_privacy_p}</p><button class="btn primary" id="set-rescan">${T.set_rescan}</button></div>`))
   $('#set-rescan').onclick = () => api.startScan().then(scanStarted)
 }
@@ -421,6 +537,20 @@ function recordHotkey(btn) {
     const done = acc => { removeEventListener('keydown', onKey, true); btn.classList.remove('rec'); btn.innerHTML = keycaps(acc || 'Alt+Space') }
     addEventListener('keydown', onKey, true)
   }
+}
+
+// ------------------------------------------------------------ updates ----
+function updateBanner(u) {
+  if ($('.upd-banner')) return
+  const b = h(`<div class="upd-banner"><div class="upd-icon">${ICON.spark}</div><div class="upd-txt"><b>${T.upd_avail(esc(u.version))}</b><span></span></div>
+    <button class="btn" data-a="later">${T.upd_later}</button><button class="btn primary" data-a="go">${T.upd_install}</button></div>`)
+  $('[data-a="later"]', b).onclick = () => { b.classList.add('out'); setTimeout(() => b.remove(), 200) }
+  $('[data-a="go"]', b).onclick = async e => {
+    e.currentTarget.disabled = true; $('[data-a="later"]', b).remove()
+    api.on('update-progress', p => { $('.upd-txt span', b).textContent = T.upd_progress(Math.round(p * 100)) })
+    try { await api.installUpdate() } catch { toast(T.upd_fail); b.remove() }
+  }
+  document.body.append(b)
 }
 
 // ------------------------------------------------------------ actions ----
@@ -460,7 +590,7 @@ function toast(text) {
 addEventListener('keydown', e => {
   if ($('#menu') && e.key === 'Escape') return closeMenu()
   if (!$('#stage').hidden) return
-  if (e.metaKey && /^[1-8]$/.test(e.key)) { e.preventDefault(); go(NAV.filter(x => x !== 'sep')[Number(e.key) - 1][0]); return }
+  if (e.metaKey && /^[1-9]$/.test(e.key)) { e.preventDefault(); go(NAV.filter(x => x !== 'sep')[Number(e.key) - 1][0]); return }
   if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (state.view !== 'search') go('search'); else $('#q')?.select(); return }
   if (state.view !== 'search') return
   const q = $('#q'), f = selected()
@@ -614,6 +744,8 @@ async function boot() {
   // "See all in Lumen" from the quick panel.
   await api.on('app://query', q => { state.query = q; state.kinds.clear(); state.view = 'search'; movePill(); render(); setTimeout(() => $('#q')?.focus(), 30) })
   await api.on('app://theme', applyTheme)
+  await api.on('update-available', updateBanner)
+  if (!isApp && location.hash.includes('update')) setTimeout(async () => updateBanner(await api.checkUpdate()), 600)
   const snap = await refreshSnapshot()
   applyTheme(!isApp && /light|dark/.test(location.hash) ? location.hash.match(/light|dark/)[0] : snap.config.theme)
   if (snap.firstRun) onboarding()

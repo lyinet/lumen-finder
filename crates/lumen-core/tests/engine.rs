@@ -251,3 +251,25 @@ fn ocr_and_collections() {
     assert_eq!(stats.iter().find(|s| s.id == "contracts").unwrap().files, 2);
     assert_eq!(stats.iter().find(|s| s.id == "resumes").unwrap().files, 0);
 }
+
+#[test]
+fn timeline_by_month() {
+    let (dir, index, cfg) = setup();
+    let old = dir.path().join("home/Documents/工作/劳动合同.pdf");
+    // 2023-06-15 12:00 UTC: mid-month, so any local time zone lands in June.
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_686_830_400);
+    fs::File::options().write(true).open(&old).unwrap().set_modified(t).unwrap();
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+
+    let months = index.timeline(24).unwrap();
+    assert_eq!(months.iter().map(|m| m.files).sum::<i64>(), 6);
+    let june = months.iter().find(|m| m.month == "2023-06").expect("June 2023 is on the timeline");
+    assert_eq!(june.files, 1);
+    assert_eq!(june.kinds[0].kind, Kind::Pdf);
+    assert_eq!(months.last().unwrap().month, "2023-06", "newest month first");
+
+    let files = index.month("2023-06", None, 50, 0).unwrap();
+    assert_eq!(files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["劳动合同.pdf"]);
+    assert!(index.month("2023-06", Some(Kind::Image), 50, 0).unwrap().is_empty());
+    assert!(index.month("2023-06'--", None, 50, 0).unwrap().is_empty());
+}
