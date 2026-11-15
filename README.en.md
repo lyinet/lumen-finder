@@ -31,7 +31,7 @@
   <img src="docs/screenshots/semantic-en.jpg" alt="Search by meaning" width="80%">
 </p>
 
-- **Search by meaning (beta)** — describe the file instead of remembering its name: "snow videos from Japan", "the lease I signed last year". Lumen uses the language model built into macOS to learn what each file is about; nothing to download, nothing leaves your Mac. Click ✦ in the search bar or press ⌘J.
+- **Search by meaning (beta)** — describe the file instead of remembering its name: "snow videos from Japan", "the lease I signed last year". Lumen uses the language model built into macOS to learn what each file is about; if a language model is missing, macOS downloads it from Apple once; your files never leave your Mac. Click ✦ in the search bar or press ⌘J.
 - **Homebrew** — `brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder && brew install --cask lumen-finder`
 
 ## ✦ New in v0.5: timeline, share card, in-app updates

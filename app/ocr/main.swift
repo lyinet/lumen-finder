@@ -60,14 +60,16 @@ func pdfPages(_ url: URL, _ each: (CGImage) -> Bool) -> Bool {
     return true
 }
 
-// Text embeddings, on device, no downloads. For each language the best
-// model this Mac already has wins:
+// Text embeddings, on device. For each language the best model wins:
 //   1. NLEmbedding sentence embedding (macOS 11+; not every language/Mac)
-//   2. NLContextualEmbedding, mean of token vectors (macOS 14+, only when
-//      its assets are already on disk; we never request a download)
+//   2. NLContextualEmbedding, mean of token vectors (macOS 14+). When its
+//      assets are not on this Mac yet we ask macOS to fetch them once
+//      (Apple's own on-demand language assets; only the model is downloaded,
+//      no file content goes anywhere) and wait up to ASSET_WAIT seconds.
 //   3. NLEmbedding word embedding, mean of word vectors
 // A backend is chosen once per process, so every vector from one helper
-// build on one Mac is comparable. `lumen-ocr embed-info` names them.
+// run is comparable. `lumen-ocr embed-info` names them (and is what Lumen
+// calls before each embedding pass, so a newly arrived model is noticed).
 typealias Embed = (String) -> [Double]?
 
 func mean(_ rows: [[Double]]) -> [Double]? {
@@ -77,11 +79,33 @@ func mean(_ rows: [[Double]]) -> [Double]? {
     return acc.map { $0 / Double(rows.count) }
 }
 
+let ASSET_WAIT: Double = 180
+
+@available(macOS 14.0, *)
+func ensureAssets(_ ce: NLContextualEmbedding) -> Bool {
+    if ce.hasAvailableAssets { return true }
+    if ProcessInfo.processInfo.environment["LUMEN_NO_ASSET_REQUEST"] != nil { return false }
+    // The completion may arrive on the main queue, so spin the run loop
+    // rather than block it.
+    final class Box { var finished = false; var ok = false }
+    let box = Box()
+    ce.requestAssets { result, error in
+        if let error = error { FileHandle.standardError.write("asset request: \(error)\n".data(using: .utf8)!) }
+        DispatchQueue.main.async { box.ok = (result == .available); box.finished = true }
+    }
+    let deadline = Date().addingTimeInterval(ASSET_WAIT)
+    while !box.finished && Date() < deadline {
+        _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.2))
+    }
+    let ok = box.ok
+    return ok || ce.hasAvailableAssets
+}
+
 func backend(_ lang: NLLanguage) -> (String, Embed)? {
     if let m = NLEmbedding.sentenceEmbedding(for: lang) {
         return ("sentence:\(m.dimension)", { m.vector(for: $0) })
     }
-    if #available(macOS 14.0, *), let ce = NLContextualEmbedding(language: lang), ce.hasAvailableAssets,
+    if #available(macOS 14.0, *), let ce = NLContextualEmbedding(language: lang), ensureAssets(ce),
        (try? ce.load()) != nil {
         return ("contextual:\(ce.dimension)", { text in
             guard let r = try? ce.embeddingResult(for: text, language: lang) else { return nil }

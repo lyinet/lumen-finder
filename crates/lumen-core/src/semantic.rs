@@ -59,6 +59,15 @@ impl Model {
 /// model could not embed (empty, or that language's model is missing).
 pub trait Embedder: Send + Sync {
     fn embed(&self, items: &[(Model, String)]) -> Result<Vec<Option<Vec<f32>>>>;
+    /// Which backend each model uses right now (e.g. "sentence:512", or
+    /// "none"). When it changes, that model's vectors are rebuilt: vectors
+    /// from different backends are not comparable, and a model that just
+    /// became available should get a chance at files it skipped before.
+    fn signature(&self, _model: Model) -> Option<String> {
+        None
+    }
+    /// Forget any cached signature so the next call looks again.
+    fn refresh(&self) {}
 }
 
 static EMBEDDER: RwLock<Option<Arc<dyn Embedder>>> = RwLock::new(None);
@@ -71,7 +80,7 @@ pub fn set_embedder(e: Option<Arc<dyn Embedder>>) {
 
 /// Use the macOS helper (`lumen-ocr embed`) when it exists.
 pub fn set_embed_helper(path: Option<PathBuf>) {
-    set_embedder(path.filter(|p| p.exists()).map(|bin| Arc::new(HelperEmbedder { bin }) as Arc<dyn Embedder>));
+    set_embedder(path.filter(|p| p.exists()).map(|bin| Arc::new(HelperEmbedder { bin, info: Mutex::new(None) }) as Arc<dyn Embedder>));
 }
 
 pub fn available() -> bool {
@@ -87,9 +96,36 @@ fn embedder() -> Option<Arc<dyn Embedder>> {
 /// empty line when it has none.
 struct HelperEmbedder {
     bin: PathBuf,
+    /// embed-info output, read once per indexing pass (see `refresh`).
+    info: Mutex<Option<String>>,
+}
+
+impl HelperEmbedder {
+    /// `lumen-ocr embed-info`: "zh\t<backend>" lines. This is also when the
+    /// helper asks macOS for a missing language model.
+    fn info(&self) -> Option<String> {
+        let out = std::process::Command::new(&self.bin)
+            .arg("embed-info")
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
 }
 
 impl Embedder for HelperEmbedder {
+    fn refresh(&self) {
+        *self.info.lock().unwrap() = None;
+    }
+    fn signature(&self, model: Model) -> Option<String> {
+        let mut cache = self.info.lock().unwrap();
+        if cache.is_none() {
+            *cache = self.info();
+        }
+        let info = cache.as_ref()?;
+        info.lines().find_map(|l| l.strip_prefix(model.tag()).and_then(|r| r.strip_prefix('\t'))).map(|s| s.trim().to_string())
+    }
+
     fn embed(&self, items: &[(Model, String)]) -> Result<Vec<Option<Vec<f32>>>> {
         use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};
@@ -236,6 +272,21 @@ pub fn index_semantic(
         return Ok(report);
     };
     let mut conn = index.writer()?;
+    emb.refresh();
+    for model in [Model::Zh, Model::En] {
+        let Some(sig) = emb.signature(model) else { continue };
+        let key = format!("vec_sig_{}", model.tag());
+        let old: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = ?1", [&key], |r| r.get(0)).ok();
+        if old.as_deref() != Some(sig.as_str()) {
+            log::info!("semantic: {} model is now {sig} (was {old:?}); rebuilding its vectors", model.tag());
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM vectors WHERE model = ?1", [model as i64])?;
+            set_meta(&tx, &key, &sig)?;
+            bump_rev(&tx)?;
+            tx.commit()?;
+        }
+    }
     let jobs: Vec<(i64, i64, i64, String, String, Option<String>)> = {
         let mut stmt = conn.prepare(
             "SELECT f.id, f.size, f.mtime, f.name, f.parent, substr(c.body, 1, 600) FROM files f

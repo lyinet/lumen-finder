@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "log",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "blake3",

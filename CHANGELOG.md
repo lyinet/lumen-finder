@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.1 — 2026-11-16
+
+- **Chinese search by meaning**: when this Mac has no Chinese embedding model, the helper now asks macOS for Apple's on-demand Chinese language assets (NLContextualEmbedding, macOS 14+) and waits up to 3 minutes. Only Apple's model is downloaded; no file content leaves the Mac. Set `LUMEN_NO_ASSET_REQUEST=1` to opt out.
+- Lumen checks `lumen-ocr embed-info` before every embedding pass and remembers which model each language used; when it changes (a model arrived, or macOS switched models), only that language's vectors are rebuilt.
+- Privacy copy names the one-time model download.
+- This release is also the first real-Mac test of in-app updates (0.6.0 → 0.6.1).
+
 ## v0.6.0 — 2026-11-15
 
 - **Search by meaning (beta)**: describe a file instead of remembering its name ("北海道的雪景视频", "the lease I signed last year"). Every file gets one sentence vector built from its name, folder and first lines of text, from Apple's NaturalLanguage sentence embeddings via the bundled helper (`lumen-ocr embed`): on device, nothing to download. Chinese text uses the Chinese model, everything else the English one; queries are embedded with both. Vectors are stored as i8 (~0.5 KB per file) and searched by brute force in memory. Toggle with the ✦ button in the search bar or ⌘J; a keyword search with no results offers to retry by meaning. Settings → Search powers → Search by meaning. CLI: `lumen ask …`.

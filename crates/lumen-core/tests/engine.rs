@@ -333,3 +333,50 @@ fn semantic_search_finds_by_meaning() {
     assert!(r.hits.is_empty());
     set_embedder(None);
 }
+
+/// A Chinese model that shows up later (macOS fetched it): files it skipped
+/// are embedded on the next pass, English vectors are kept.
+struct LateZh(std::sync::atomic::AtomicBool);
+
+impl Embedder for LateZh {
+    fn embed(&self, items: &[(semantic::Model, String)]) -> anyhow::Result<Vec<Option<Vec<f32>>>> {
+        let zh = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        let all = ConceptEmbedder.embed(items)?;
+        Ok(items
+            .iter()
+            .zip(all)
+            .map(|((m, _), v)| if *m == semantic::Model::Zh && !zh { None } else { v })
+            .collect())
+    }
+    fn signature(&self, model: semantic::Model) -> Option<String> {
+        let zh = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        Some(match model {
+            semantic::Model::Zh if !zh => "none".into(),
+            _ => "test:9".into(),
+        })
+    }
+}
+
+#[test]
+fn semantic_reembeds_when_a_model_arrives() {
+    let _g = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("Movies/hokkaido-snow-day.mov"), b"mov");
+    touch(&home.join("Documents/租房协议.pdf"), b"pdf");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home], content_search: false, ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+
+    let emb = Arc::new(LateZh(AtomicBool::new(false)));
+    set_embedder(Some(emb.clone()));
+    let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!((r.embedded, r.failed), (1, 1));
+    assert_eq!(index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap().embedded, 0);
+
+    emb.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!((r.embedded, r.failed), (1, 0), "only the Chinese file is redone");
+    assert_eq!(semantic::semantic_count(&index).unwrap(), 2);
+    set_embedder(None);
+}
