@@ -22,6 +22,11 @@ function realBridge() {
     cancelScan: () => invoke('cancel_scan'),
     setRoots: roots => invoke('set_roots', { roots }),
     setExcluded: paths => invoke('set_excluded', { paths }),
+    setExcludedNames: names => invoke('set_excluded_names', { names }),
+    setPaused: on => invoke('set_paused', { on }),
+    suggestions: () => invoke('suggestions'),
+    recentlyOpened: limit => invoke('recently_opened', { limit }),
+    rebuildIndex: () => invoke('rebuild_index'),
     open: path => invoke('open_path', { path }),
     reveal: path => invoke('reveal', { path }),
     quickLook: path => invoke('quick_look', { path }),
@@ -111,9 +116,10 @@ function mockBridge() {
     files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: kind === 'video' ? 1.8e9 : kind === 'image' ? 5.2e6 : 2.1e5, mtime: now - 86400 * days })
   }
   let scanned = !location.hash.includes('first')
+  let paused = location.hash.includes('paused')
   const listeners = {}
   const COLS = [['invoices', /发票|invoice|收据/i], ['contracts', /合同|协议|contract/i], ['ids', /证件|护照|passport|身份证/i], ['screenshots', /^(Screenshot|截屏)/], ['resumes', /简历|resume/i]]
-  const opts = { content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto', semantic: true }
+  const opts = { excluded_names: ['node_modules', '.git', 'Caches', '*.log'], pause_on_battery: true, content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto', semantic: true }
   const emit = (e, p) => (listeners[e] || []).forEach(cb => cb(p))
   const ALIAS = { 文档: 'document', 音乐: 'audio', 视频: 'video', 图片: 'image', 照片: 'image', music: 'audio', doc: 'document', photo: 'image' }
 
@@ -174,8 +180,11 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.7.0',
+      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
       semanticReady: true, semanticFiles: files.length,
+      // #battery / #paused preview the background-work states (v0.8).
+      hold: paused ? 'user' : location.hash.includes('battery') ? 'battery' : null,
+      indexRebuilt: location.hash.includes('rebuilt'),
     }),
     search: async req => query(req),
     overview: async () => {
@@ -218,7 +227,7 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic', includeIcloud: 'include_icloud' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic', includeIcloud: 'include_icloud', pauseOnBattery: 'pause_on_battery' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
@@ -236,7 +245,7 @@ function mockBridge() {
       return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
-    checkUpdate: async () => location.hash.includes('update') ? { version: '0.7.0', current: '0.6.1', notes: '' } : null,
+    checkUpdate: async () => location.hash.includes('update') ? { version: '0.8.0', current: '0.6.1', notes: '' } : null,
     installUpdate: async () => { for (let p = 0; p <= 1; p += 0.1) { emit('update-progress', p); await new Promise(r => setTimeout(r, 120)) } },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     // #link=ask:北海道 previews a lumen:// link arriving.
@@ -245,6 +254,11 @@ function mockBridge() {
     openFdaSettings: async () => {},
     setRoots: async roots => ({ roots }),
     setExcluded: async p => ({ excluded_paths: p }),
+    setExcludedNames: async names => { opts.excluded_names = names; return opts },
+    setPaused: async on => { paused = on; return on ? 'user' : null },
+    suggestions: async () => [{ query: 'nzzj', name: '2024年终总结.key' }, { query: 'ldht', name: '劳动合同.pdf' }],
+    recentlyOpened: async n => files.slice(0, n || 20),
+    rebuildIndex: async () => {},
     open: async () => {}, reveal: async () => {}, quickLook: async () => {},
     pickFolder: async () => `${HOME}/Projects`,
     on: async (e, cb) => { (listeners[e] ||= []).push(cb) },

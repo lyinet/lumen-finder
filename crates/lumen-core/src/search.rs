@@ -264,9 +264,15 @@ fn build_where(
             ors.push("f.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)".into());
             w.args.push(Value::Text(fts_quote(t)));
         } else {
-            ors.push("f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\'".into());
+            // Pinyin keys are plain ASCII: a word with 汉字 in it can never
+            // match one, so skip the second scan.
             let pat = like_escape(t);
-            w.args.push(Value::Text(pat.clone()));
+            if t.is_ascii() {
+                ors.push("f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\'".into());
+                w.args.push(Value::Text(pat.clone()));
+            } else {
+                ors.push("f.name LIKE ? ESCAPE '\\'".into());
+            }
             w.args.push(Value::Text(pat));
         }
         if content {
@@ -321,80 +327,202 @@ impl Index {
         let started = std::time::Instant::now();
         let p = parse(&req.query);
         let limit = if req.limit == 0 { 60 } else { req.limit.min(500) };
-        let conn = self.conn();
-
         let content = !req.names_only;
-        let w = build_where(&p, &req.kinds, true, content);
-        let where_sql = if w.sql.is_empty() { "1".to_string() } else { w.sql.join(" AND ") };
+        let mut kinds: Vec<Kind> = p.kinds.clone();
+        kinds.extend_from_slice(&req.kinds);
+        kinds.sort_by_key(|k| k.as_i64());
+        kinds.dedup();
 
-        // Relevance: exact name > name starts with > name contains > pinyin
-        // > folder-only match, then the newest first.
-        let mut order_args: Vec<Value> = Vec::new();
-        let order = match req.sort {
-            Sort::Relevance if !p.terms.is_empty() || !p.name_terms.is_empty() => {
-                let all: Vec<String> = p.terms.iter().chain(p.name_terms.iter()).cloned().collect();
-                let q = all.join(" ");
-                let first = all[0].clone();
-                order_args.push(Value::Text(q.clone()));
-                order_args.push(Value::Text(format!("{}%", first.replace(['%', '_'], ""))));
-                order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
-                order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
-                // A name or folder hit always outranks a match inside the text.
-                order_args.push(Value::Text(format!("%{}%", first.replace(['%', '_'], ""))));
-                "CASE
-                    WHEN lower(substr(f.name, 1, length(f.name) - length(f.ext) - 1)) = lower(?) THEN 0
-                    WHEN f.name LIKE ? THEN 1
-                    WHEN f.name LIKE ? THEN 2
-                    WHEN f.name_py LIKE ? THEN 3
-                    WHEN f.parent LIKE ? THEN 4
-                    ELSE 5 END, f.mtime DESC"
-                    .to_string()
-            }
-            Sort::Relevance | Sort::Recent => "f.mtime DESC".into(),
-            Sort::Oldest => "f.mtime ASC".into(),
-            Sort::Largest => "f.size DESC".into(),
-            Sort::Name => "f.name COLLATE NOCASE ASC".into(),
+        let conn = self.conn();
+        let has_words = !p.terms.is_empty() || !p.name_terms.is_empty();
+        let (mut hits, total, kind_counts) = if has_words {
+            ranked(&conn, &p, &kinds, req.sort, limit, req.offset, content)?
+        } else {
+            browse(&conn, &p, &kinds, req.sort, limit, req.offset)?
         };
-
-        let sql = format!(
-            "SELECT {} FROM files f WHERE {where_sql} ORDER BY {order} LIMIT {limit} OFFSET {}",
-            FileRecord::COLS,
-            req.offset
-        );
-        let mut args = w.args.clone();
-        args.extend(order_args);
-        let mut stmt = conn.prepare(&sql)?;
-        let mut hits = stmt
-            .query_map(rusqlite::params_from_iter(args.iter()), FileRecord::from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
         if content && !p.terms.is_empty() {
             add_snippets(&conn, &mut hits, &p.terms)?;
         }
-
-        let total: i64 = conn.query_row(
-            &format!("SELECT count(*) FROM files f WHERE {where_sql}"),
-            rusqlite::params_from_iter(w.args.iter()),
-            |r| r.get(0),
-        )?;
-
-        let wk = build_where(&p, &[], false, content);
-        let wk_sql = if wk.sql.is_empty() { "1".to_string() } else { wk.sql.join(" AND ") };
-        let mut kind_counts = BTreeMap::new();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT f.kind, count(*) FROM files f WHERE {wk_sql} GROUP BY f.kind"
-        ))?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(wk.args.iter()), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        for row in rows.flatten() {
-            if let Some(k) = Kind::from_i64(row.0) {
-                kind_counts.insert(k.slug().to_string(), row.1);
-            }
-        }
-
         Ok(SearchResponse { hits, total, kind_counts, took_us: started.elapsed().as_micros() as u64 })
     }
+}
+
+type Found = (Vec<FileRecord>, i64, BTreeMap<String, i64>);
+
+fn kind_map(counts: impl IntoIterator<Item = (i64, i64)>) -> BTreeMap<String, i64> {
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| Kind::from_i64(k).map(|k| (k.slug().to_string(), n)))
+        .collect()
+}
+
+/// Searches with words. Matching a word means scanning names (or the
+/// full-text index), so this makes that pass once: it reads every match's
+/// sort keys and kind, counts the kinds, ranks in memory, and only then
+/// loads the page of records it shows. Before v0.8 the same scan ran three
+/// times (page, total, chip counts), which at 300 000 files cost ~0.7 s.
+fn ranked(
+    conn: &rusqlite::Connection,
+    p: &Parsed,
+    kinds: &[Kind],
+    sort: Sort,
+    limit: usize,
+    offset: usize,
+    content: bool,
+) -> Result<Found> {
+    // Chip counts ignore the kind filter, so the pass does too and the kind
+    // filter is applied to its rows below.
+    let w = build_where(p, &[], false, content);
+    // With words in play, one pass over the table beats walking the mtime or
+    // size index: a bound like after:2024 still covers a third of the files,
+    // and each index hit would be a random row read plus a LIKE. The unary +
+    // keeps SQLite off those indexes (538 ms → see tests/scale.rs).
+    let w_sql: Vec<String> =
+        w.sql.iter().map(|c| c.replace("f.mtime ", "+f.mtime ").replace("f.size ", "+f.size ")).collect();
+    let where_sql = if w_sql.is_empty() { "1".to_string() } else { w_sql.join(" AND ") };
+    // The ranking expressions sit in the SELECT list, so their values bind
+    // before the WHERE clause's.
+    let mut args: Vec<Value> = Vec::new();
+
+    // Relevance: exact name > name starts with > name contains > pinyin
+    // > folder-only match > words inside. Within each tier, files the user
+    // opened from Lumen in the last 30 days come first (most opened, then
+    // most recent), then the newest.
+    let all: Vec<String> = p.terms.iter().chain(p.name_terms.iter()).cloned().collect();
+    let first = all[0].replace(['%', '_'], "");
+    let tier = if matches!(sort, Sort::Relevance) {
+        args.push(Value::Text(all.join(" ")));
+        args.push(Value::Text(format!("{first}%")));
+        args.push(Value::Text(format!("%{first}%")));
+        args.push(Value::Text(format!("%{first}%")));
+        args.push(Value::Text(format!("%{first}%")));
+        args.push(Value::Integer(crate::index::now() - 30 * 86_400));
+        // A name or folder hit always outranks a match inside the text.
+        "CASE
+            WHEN lower(substr(f.name, 1, length(f.name) - length(f.ext) - 1)) = lower(?) THEN 0
+            WHEN f.name LIKE ? THEN 1
+            WHEN f.name LIKE ? THEN 2
+            WHEN f.name_py LIKE ? THEN 3
+            WHEN f.parent LIKE ? THEN 4
+            ELSE 5 END,
+         CASE WHEN o.last >= ? THEN o.count ELSE 0 END, coalesce(o.last, 0)"
+    } else {
+        "0, 0, 0"
+    };
+    args.extend(w.args.iter().cloned());
+    let name = if matches!(sort, Sort::Name) { "f.name" } else { "''" };
+    let sql = format!(
+        "SELECT f.id, f.kind, {tier}, f.mtime, f.size, {name}
+         FROM files f LEFT JOIN opens o ON o.id = f.id WHERE {where_sql}"
+    );
+    struct Row {
+        id: i64,
+        tier: i64,
+        opened: i64,
+        last: i64,
+        mtime: i64,
+        size: i64,
+        name: String,
+    }
+    let mut counts: BTreeMap<i64, i64> = BTreeMap::new();
+    let mut rows: Vec<Row> = Vec::new();
+    {
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut q = stmt.query(rusqlite::params_from_iter(args.iter()))?;
+        while let Some(r) = q.next()? {
+            let kind: i64 = r.get(1)?;
+            *counts.entry(kind).or_default() += 1;
+            if !kinds.is_empty() && !kinds.iter().any(|k| k.as_i64() == kind) {
+                continue;
+            }
+            rows.push(Row {
+                id: r.get(0)?,
+                tier: r.get(2)?,
+                opened: r.get(3)?,
+                last: r.get(4)?,
+                mtime: r.get(5)?,
+                size: r.get(6)?,
+                name: if matches!(sort, Sort::Name) { r.get::<_, String>(7)?.to_lowercase() } else { String::new() },
+            });
+        }
+    }
+    let total = rows.len() as i64;
+    let end = (offset + limit).min(rows.len());
+    if offset < end {
+        let cmp = |a: &Row, b: &Row| match sort {
+            Sort::Relevance => a
+                .tier
+                .cmp(&b.tier)
+                .then(b.opened.cmp(&a.opened))
+                .then(b.last.cmp(&a.last))
+                .then(b.mtime.cmp(&a.mtime)),
+            Sort::Recent => b.mtime.cmp(&a.mtime),
+            Sort::Oldest => a.mtime.cmp(&b.mtime),
+            Sort::Largest => b.size.cmp(&a.size),
+            Sort::Name => a.name.cmp(&b.name),
+        }
+        .then(a.id.cmp(&b.id));
+        // Only the page needs to be in order.
+        if end < rows.len() {
+            rows.select_nth_unstable_by(end - 1, cmp);
+            rows.truncate(end);
+        }
+        rows.sort_unstable_by(cmp);
+    }
+    let ids: Vec<i64> = rows.get(offset..end).unwrap_or(&[]).iter().map(|r| r.id).collect();
+    let hits = records_by_id(conn, &ids)?;
+    Ok((hits, total, kind_map(counts)))
+}
+
+/// Filters without words (`kind:pdf >10mb`, or nothing at all): the indexes
+/// on kind, mtime and size answer these without a scan.
+fn browse(conn: &rusqlite::Connection, p: &Parsed, kinds: &[Kind], sort: Sort, limit: usize, offset: usize) -> Result<Found> {
+    let w = build_where(p, kinds, true, false);
+    let where_sql = if w.sql.is_empty() { "1".to_string() } else { w.sql.join(" AND ") };
+    let order = match sort {
+        Sort::Relevance | Sort::Recent => "f.mtime DESC",
+        Sort::Oldest => "f.mtime ASC",
+        Sort::Largest => "f.size DESC",
+        Sort::Name => "f.name COLLATE NOCASE ASC",
+    };
+    let sql = format!(
+        "SELECT {} FROM files f WHERE {where_sql} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+        FileRecord::COLS
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let hits = stmt
+        .query_map(rusqlite::params_from_iter(w.args.iter()), FileRecord::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let wk = build_where(p, &[], false, false);
+    let wk_sql = if wk.sql.is_empty() { "1".to_string() } else { wk.sql.join(" AND ") };
+    let mut stmt = conn.prepare_cached(&format!("SELECT f.kind, count(*) FROM files f WHERE {wk_sql} GROUP BY f.kind"))?;
+    let counts: Vec<(i64, i64)> = stmt
+        .query_map(rusqlite::params_from_iter(wk.args.iter()), |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    // The total is the chip counts summed over the chosen kinds.
+    let total = counts
+        .iter()
+        .filter(|(k, _)| kinds.is_empty() || kinds.iter().any(|x| x.as_i64() == *k))
+        .map(|(_, n)| n)
+        .sum();
+    Ok((hits, total, kind_map(counts)))
+}
+
+/// Records for these ids, in this order.
+fn records_by_id(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRecord>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks = vec!["?"; ids.len()].join(",");
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM files f WHERE f.id IN ({marks})", FileRecord::COLS))?;
+    let mut by_id: std::collections::HashMap<i64, FileRecord> = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), FileRecord::from_row)?
+        .filter_map(|r| r.ok())
+        .map(|r| (r.id, r))
+        .collect();
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 /// For hits whose name does not show why they matched, an excerpt of the

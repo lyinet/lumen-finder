@@ -34,38 +34,42 @@ fn valid_month(m: &str) -> bool {
 impl Index {
     /// Months that have files, newest first (at most `limit` months).
     pub fn timeline(&self, limit: usize) -> Result<Vec<MonthStat>> {
-        let conn = self.conn();
-        // Files dated in the future (bad camera clocks) or before the Mac era
-        // would only add noise at either end of the timeline.
-        let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {MONTH} AS m, f.kind, count(*), coalesce(sum(f.size),0) FROM files f
-             WHERE f.mtime > 631152000 AND f.mtime < strftime('%s','now') + 86400
-             GROUP BY m, f.kind ORDER BY m DESC"
-        ))?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
-        })?;
-        let mut out: Vec<MonthStat> = Vec::new();
-        for row in rows.flatten() {
-            let (month, kind, files, bytes) = row;
-            if out.last().map(|m| m.month != month).unwrap_or(true) {
-                if out.len() == limit {
-                    break;
+        let mut all = self.timeline_all()?;
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    fn timeline_all(&self) -> Result<Vec<MonthStat>> {
+        self.memo("timeline", |conn| {
+            // Files dated in the future (bad camera clocks) or before the Mac era
+            // would only add noise at either end of the timeline.
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {MONTH} AS m, f.kind, count(*), coalesce(sum(f.size),0) FROM files f
+                 WHERE f.mtime > 631152000 AND f.mtime < strftime('%s','now') + 86400
+                 GROUP BY m, f.kind ORDER BY m DESC"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            })?;
+            let mut out: Vec<MonthStat> = Vec::new();
+            for row in rows.flatten() {
+                let (month, kind, files, bytes) = row;
+                if out.last().map(|m| m.month != month).unwrap_or(true) {
+                    out.push(MonthStat { month, files: 0, bytes: 0, kinds: Vec::new() });
                 }
-                out.push(MonthStat { month, files: 0, bytes: 0, kinds: Vec::new() });
+                let m = out.last_mut().unwrap();
+                m.files += files;
+                m.bytes += bytes;
+                if let Some(kind) = Kind::from_i64(kind) {
+                    m.kinds.push(KindCount { kind, files });
+                }
             }
-            let m = out.last_mut().unwrap();
-            m.files += files;
-            m.bytes += bytes;
-            if let Some(kind) = Kind::from_i64(kind) {
-                m.kinds.push(KindCount { kind, files });
+            for m in &mut out {
+                m.kinds.sort_by(|a, b| b.files.cmp(&a.files));
+                m.kinds.truncate(4);
             }
-        }
-        for m in &mut out {
-            m.kinds.sort_by(|a, b| b.files.cmp(&a.files));
-            m.kinds.truncate(4);
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// One month's files, newest first; `kind` narrows to one kind.

@@ -403,3 +403,57 @@ fn icloud_placeholders_are_kept_but_never_read() {
     let r = index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     assert_eq!(r.read, 1, "only the local note is opened");
 }
+
+#[test]
+fn opened_files_rank_first_and_suggestions() {
+    let (dir, index, cfg) = setup();
+    let home = dir.path().join("home");
+    touch(&home.join("Desktop/trip plan.pdf"), b"plan");
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    // All three start with "tri" (same tier); the newest wins until one is opened.
+    let before = q(&index, "tri");
+    assert_eq!(before.len(), 3);
+    assert_ne!(before[0], "trip copy.mov");
+    let target = home.join("Desktop/old/trip copy.mov");
+    index.record_open(target.to_str().unwrap()).unwrap();
+    index.record_open(target.to_str().unwrap()).unwrap();
+    assert_eq!(q(&index, "tri")[0], "trip copy.mov");
+    // An exact name still beats an opened file.
+    assert_eq!(q(&index, "trip")[0], "trip.mov");
+    // A better name match still beats an opened file.
+    assert_eq!(q(&index, "trip plan")[0], "trip plan.pdf");
+    let opened = index.recently_opened(5).unwrap();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].name, "trip copy.mov");
+
+    let s = index.suggestions(3).unwrap();
+    assert!(s.iter().any(|s| s.query == "nzzj" || s.query == "ldht"), "{s:?}");
+    for s in &s {
+        assert_eq!(q(&index, &s.query)[0], s.name, "suggestion {} must find {}", s.query, s.name);
+    }
+}
+
+#[test]
+fn damaged_index_is_rebuilt_and_reset_forgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.db");
+    fs::write(&path, b"this is not a database, it is a crash").unwrap();
+    let (index, reset) = Index::open_or_reset(&path).unwrap();
+    assert!(reset);
+    assert_eq!(index.file_count().unwrap(), 0);
+    assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("damaged")));
+    drop(index);
+    let (index, reset) = Index::open_or_reset(&path).unwrap();
+    assert!(!reset, "a healthy index opens as is");
+
+    let (_d, idx2, cfg) = setup();
+    scan(&idx2, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(idx2.file_count().unwrap(), 6);
+    idx2.reset().unwrap();
+    assert_eq!(idx2.file_count().unwrap(), 0);
+    assert_eq!(idx2.status().unwrap().generation, 0, "next scan is a first scan");
+    let r = scan(&idx2, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert!(r.full);
+    assert_eq!(q(&idx2, "nzzj"), vec!["2024年终总结.key"]);
+    drop(index);
+}

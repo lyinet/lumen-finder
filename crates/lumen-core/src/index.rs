@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE TRIGGER IF NOT EXISTS files_ad_vectors AFTER DELETE ON files BEGIN
     DELETE FROM vectors WHERE id = old.id;
 END;
+
+-- v0.8: files the user opened from Lumen, so search puts them first.
+CREATE TABLE IF NOT EXISTS opens (
+    id    INTEGER PRIMARY KEY,
+    count INTEGER NOT NULL,
+    last  INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS files_ad_opens AFTER DELETE ON files BEGIN
+    DELETE FROM opens WHERE id = old.id;
+END;
 "#;
 
 pub(crate) const UPSERT: &str = r#"
@@ -250,9 +260,126 @@ pub(crate) fn now() -> i64 {
 pub struct Index {
     path: PathBuf,
     conn: Mutex<Connection>,
+    /// Whole-index summaries (insights, timeline, collections) by name.
+    memo: Mutex<std::collections::HashMap<&'static str, Memo>>,
 }
 
+struct Memo {
+    version: i64,
+    value: Box<dyn std::any::Any + Send>,
+}
+
+
 impl Index {
+    /// Open the index, or, when the file is damaged (a crash mid-write, a
+    /// bad disk sector), set it aside and start a fresh one. The index is a
+    /// cache of the disk, so a rescan rebuilds everything. `true` means it
+    /// was rebuilt.
+    pub fn open_or_reset(path: impl AsRef<Path>) -> Result<(Index, bool)> {
+        let path = path.as_ref();
+        let healthy = |p: &Path| -> Result<Index> {
+            let idx = Index::open(p)?;
+            let ok: String = idx.conn().query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+            anyhow::ensure!(ok == "ok", "index check failed: {ok}");
+            Ok(idx)
+        };
+        match healthy(path) {
+            Ok(idx) => Ok((idx, false)),
+            Err(e) => {
+                log::warn!("index at {} is damaged ({e}); starting a new one", path.display());
+                let aside = path.with_extension(format!("damaged-{}.db", now()));
+                let _ = std::fs::rename(path, &aside);
+                for ext in ["db-wal", "db-shm"] {
+                    let _ = std::fs::remove_file(path.with_extension(ext));
+                }
+                Ok((Index::open(path)?, true))
+            }
+        }
+    }
+
+    /// Write files straight into the index as one scan generation. For load
+    /// tests and tools; the app always goes through `scan`.
+    #[doc(hidden)]
+    pub fn insert_files(&self, files: &[NewFile]) -> Result<()> {
+        let mut conn = self.writer()?;
+        let gen = get_meta_i64(&conn, "generation")?.unwrap_or(0) + 1;
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(UPSERT)?;
+            for f in files {
+                f.upsert(&mut stmt, gen)?;
+            }
+        }
+        set_meta(&tx, "generation", gen)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forget everything; the next scan is a first scan again.
+    pub fn reset(&self) -> Result<()> {
+        let conn = self.conn();
+        conn.execute_batch(
+            "BEGIN;
+             DELETE FROM opens; DELETE FROM vectors; DELETE FROM content; DELETE FROM files; DELETE FROM meta;
+             COMMIT; VACUUM;",
+        )?;
+        drop(conn);
+        self.forget_memos();
+        Ok(())
+    }
+
+    /// Remember that the user opened this file from Lumen.
+    pub fn record_open(&self, path: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO opens(id, count, last) SELECT id, 1, ?2 FROM files WHERE path = ?1
+             ON CONFLICT(id) DO UPDATE SET count = count + 1, last = excluded.last",
+            params![path, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Files opened from Lumen, most recent first.
+    pub fn recently_opened(&self, limit: usize) -> Result<Vec<FileRecord>> {
+        let sql = format!(
+            "SELECT {} FROM opens o JOIN files f ON f.id = o.id ORDER BY o.last DESC LIMIT ?1",
+            FileRecord::COLS
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([limit as i64], FileRecord::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Searches worth trying right after the first scan, drawn from the
+    /// user's own files: pinyin initials of a recent Chinese-named document
+    /// ("nzzj" → 年终总结.key), and a recent English name fragment.
+    pub fn suggestions(&self, limit: usize) -> Result<Vec<Suggestion>> {
+        let conn = self.conn();
+        let mut out: Vec<Suggestion> = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT name, name_py FROM files WHERE name_py <> '' AND cloud = 0
+               AND kind IN (0, 1, 2, 3, 6)
+             ORDER BY mtime DESC LIMIT 400",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for (name, py) in rows.flatten() {
+            let stem = name.rsplit_once('.').map(|x| x.0).unwrap_or(&name);
+            let n = stem.chars().count();
+            let initials = py.rsplit(' ').next().unwrap_or("");
+            if !(3..=8).contains(&n) || !(3..=6).contains(&initials.len()) || !initials.chars().all(|c| c.is_ascii_lowercase()) {
+                continue;
+            }
+            if out.iter().any(|s| s.query == initials) {
+                continue;
+            }
+            out.push(Suggestion { query: initials.to_string(), name });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Index> {
         let path = path.as_ref().to_path_buf();
         if let Some(dir) = path.parent() {
@@ -284,7 +411,7 @@ impl Index {
             conn.execute_batch("ALTER TABLE files ADD COLUMN cloud INTEGER NOT NULL DEFAULT 0;")?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(Index { path, conn: Mutex::new(conn) })
+        Ok(Index { path, conn: Mutex::new(conn), memo: Default::default() })
     }
 
     pub fn path(&self) -> &Path {
@@ -295,6 +422,38 @@ impl Index {
     /// so searching never waits behind a scan.
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `compute` once per change of the index, shared by every caller.
+    /// SQLite's data_version moves whenever another connection (the scanner,
+    /// the watcher) commits, which is exactly when a summary goes stale.
+    pub(crate) fn memo<T: Clone + Send + 'static>(
+        &self,
+        key: &'static str,
+        compute: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let conn = self.conn();
+        let version: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        {
+            let memo = self.memo.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = memo.get(key) {
+                if m.version == version {
+                    if let Some(v) = m.value.downcast_ref::<T>() {
+                        return Ok(v.clone());
+                    }
+                }
+            }
+        }
+        let value = compute(&conn)?;
+        self.memo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, Memo { version, value: Box::new(value.clone()) });
+        Ok(value)
+    }
+
+    pub(crate) fn forget_memos(&self) {
+        self.memo.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     pub(crate) fn writer(&self) -> Result<Connection> {
@@ -346,6 +505,13 @@ impl Index {
             .query_row("SELECT body FROM content WHERE id = ?1 AND body <> ''", [id], |r| r.get(0))
             .optional()?)
     }
+}
+
+/// A search to try, and the file it finds.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Suggestion {
+    pub query: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

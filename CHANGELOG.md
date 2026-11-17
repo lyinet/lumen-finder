@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.0 — unreleased
+
+Polish: first launch, background work, errors with a fix, ranking, custom skips, and a 300 000-file load test.
+
+- **Search while the first scan runs**: once 2 000 files are found, "Start searching now" leaves the scan running in the background (every batch is already committed); a toast says when it finishes. The done screen offers searches built from the user's own files (pinyin initials such as `nzzj → 2024年终总结.key`, plus `kind:pdf >10mb`). Engine: `Index::suggestions()`.
+- **Background work stays out of the way** (`lumen_core::pace`): content reading, OCR and embedding run at macOS background priority (`PRIO_DARWIN_BG`, helpers included), and pause on battery (Settings → Background work, on by default), in Low Power Mode, or when the user presses Pause. They resume on their own. The live indicator says why it is paused (`pace://hold` event). The watcher only reads files changed in the last hour, so it never competes with the paused backlog.
+- **Errors come with a fix**: Full Disk Access missing or revoked → a banner with "Grant access"; a scan that fails → "Retry"; a failed update → "Retry". A damaged index (failed `quick_check`) is set aside as `*.damaged-<ts>.db` and rebuilt on launch, with a note; Settings → Rebuild index does it on demand (`rebuild_index`).
+- **Ranking**: within each relevance tier, files opened from Lumen in the last 30 days come first (most opened, then most recent). An exact name still wins. Schema adds an `opens` table in place.
+- **Custom skips**: Settings → "Skip by folder name or type" — folder names skipped anywhere, and `*.ext` patterns for file types (`excluded_names`).
+- **Faster on big indexes** (300 000 synthetic files, Linux aarch64 sandbox, slower than Apple silicon): searches with words now scan once instead of three times (page, total and chip counts from one pass, ranked in memory): `合同` 719 → 70 ms, `年终总结` 121 → 52 ms, `nzzj` 125 → 56 ms, `合同 >10mb after:2024` 1 343 → 63 ms. Words with 汉字 skip the pinyin column. Insights, Timeline and collections are cached until the index changes and warmed after each scan. `cargo test -p lumen-core --release --test scale -- --ignored`.
+
 ## v0.7.0 — unreleased
 
 - **Raycast extension** (`integrations/raycast`): Search Files and Search Files by Meaning, backed by `lumen --json`. Open, reveal, Quick Look, copy path, open with; iCloud / offline / relevance accessories.

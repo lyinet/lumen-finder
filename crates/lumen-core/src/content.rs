@@ -61,7 +61,10 @@ fn ocr_helper() -> Option<std::path::PathBuf> {
 fn ocr(path: &Path) -> Result<String> {
     use std::process::{Command, Stdio};
     let Some(bin) = ocr_helper() else { return Ok(String::new()) };
-    let mut child = Command::new(bin).arg(path).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut cmd = Command::new(bin);
+    cmd.arg(path).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::pace::background_command(&mut cmd);
+    let mut child = cmd.spawn()?;
     let mut stdout = child.stdout.take().expect("piped");
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -108,7 +111,7 @@ pub fn index_content(
     on_progress: impl FnMut(&ContentProgress),
 ) -> Result<ContentReport> {
     let mut conn = index.writer()?;
-    index_pending(&mut conn, &cancel, on_progress)
+    index_pending(&mut conn, &cancel, true, on_progress)
 }
 
 struct Job {
@@ -122,6 +125,9 @@ struct Job {
 pub(crate) fn index_pending(
     conn: &mut Connection,
     cancel: &Arc<AtomicBool>,
+    // Background passes wait for power and Pause (see pace.rs); the watcher's
+    // few just-saved files do not.
+    paced: bool,
     mut on_progress: impl FnMut(&ContentProgress),
 ) -> Result<ContentReport> {
     let started = Instant::now();
@@ -145,12 +151,15 @@ pub(crate) fn index_pending(
     } else {
         String::new()
     };
+    // The watcher reads only what was just saved; the rest of the queue is
+    // the background pass's, which may be holding for power.
+    let recent = if paced { String::new() } else { format!("AND f.mtime >= {}", crate::index::now() - 3600) };
     let jobs: Vec<Job> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT f.id, f.path, f.ext, f.size, f.mtime FROM files f
              LEFT JOIN content c ON c.id = f.id
              WHERE ((f.ext IN ({marks}) AND f.size <= ?1) {images})
-               AND f.cloud = 0
+               AND f.cloud = 0 {recent}
                AND (c.id IS NULL OR c.mtime <> f.mtime OR c.size <> f.size)
              ORDER BY f.ext IN ({ocr_marks}), f.mtime DESC"
         ))?;
@@ -177,8 +186,12 @@ pub(crate) fn index_pending(
         let tx = out_tx.clone();
         let cancel = cancel.clone();
         workers.push(std::thread::spawn(move || {
+            if paced {
+                crate::pace::background_thread();
+            }
             for job in rx {
-                if cancel.load(Ordering::Relaxed) {
+                // Hold still on battery, in Low Power Mode or when paused.
+                if cancel.load(Ordering::Relaxed) || (paced && !crate::pace::wait(&cancel)) {
                     break;
                 }
                 let (text, failed) = match extract(Path::new(&job.path), &job.ext) {

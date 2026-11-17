@@ -114,6 +114,14 @@ const SPARK = '<svg viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9
 const searchPh = () => state.semantic ? T.sem_ph : state.snapshot?.config?.content_search === false ? T.search_ph : T.search_ph2
 function viewSearch(v) {
   v.classList.toggle('semantic', state.semantic)
+  // Full Disk Access missing (or taken back later): say what it costs, offer the fix.
+  const snap = state.snapshot
+  if (snap && !snap.fullDiskAccess && !snap.firstRun && !sessionStorage.getItem('fda-later')) {
+    const b = h(`<div class="notice">${ICON.shield}<span>${T.fda_banner}</span><button class="btn small primary">${T.fda_fix}</button><button class="btn small" data-a="later">${T.later}</button></div>`)
+    $('.primary', b).onclick = () => api.openFdaSettings()
+    $('[data-a="later"]', b).onclick = () => { sessionStorage.setItem('fda-later', '1'); b.remove() }
+    v.append(b)
+  }
   v.append(h(`<div class="searchbar ${state.query ? 'has-q' : ''}">${state.semantic ? SPARK : ICON.search}
       <input id="q" spellcheck="false" autocomplete="off" placeholder="${esc(searchPh())}" value="${esc(state.query)}" />
       <span class="meta" id="meta"></span><button class="clear" id="clear">${ICON.x}</button>
@@ -465,12 +473,12 @@ async function viewDupes(v) {
 }
 
 /** A destructive button that needs a second click within 3 s. */
-function armed(btn, confirmText, run) {
+function armed(btn, confirmText, run, icon = ICON.trash) {
   const label = btn.innerHTML; let t
   btn.onclick = async e => {
     e.stopPropagation()
     if (!btn.classList.contains('armed')) {
-      btn.classList.add('armed'); btn.innerHTML = `${ICON.trash}${confirmText}`
+      btn.classList.add('armed'); btn.innerHTML = `${icon}${confirmText}`
       t = setTimeout(() => { btn.classList.remove('armed'); btn.innerHTML = label }, 3000); return
     }
     clearTimeout(t); btn.disabled = true; await run()
@@ -507,6 +515,8 @@ async function viewSettings(v) {
     ${toggleRow('icloud', T.set_icloud, T.set_icloud_p, snap.config.include_icloud !== false)}
     ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
   form.append(feats)
+  form.append(bgField(snap))
+  form.append(skipField([...(snap.config.excluded_names || [])]))
   const gen = h(`<div class="field"><h3>${T.set_general}</h3>
     ${toggleRow('quick', T.set_quick, T.set_quick_p, snap.config.quick_panel !== false)}
     ${toggleRow('login', T.set_login, T.set_login_p, !!snap.config.launch_at_login)}
@@ -546,6 +556,53 @@ async function viewSettings(v) {
   }
   form.append(h(`<div class="field"><h3>${T.set_privacy}</h3><p>${T.set_privacy_p}</p><button class="btn primary" id="set-rescan">${T.set_rescan}</button></div>`))
   $('#set-rescan').onclick = () => api.startScan().then(scanStarted)
+  const rb = h(`<div class="field"><h3>${T.set_rebuild}</h3><p>${T.set_rebuild_p}</p><button class="btn danger" id="set-rebuild">${ICON.refresh || ''}${T.set_rebuild}</button></div>`)
+  form.append(rb)
+  armed($('#set-rebuild', rb), T.set_rebuild_confirm, async () => {
+    await api.rebuildIndex(); toast(T.rebuild_started); scanStarted(); await refreshSnapshot()
+    $('#set-rebuild', rb).disabled = false; $('#set-rebuild', rb).classList.remove('armed'); $('#set-rebuild', rb).innerHTML = T.set_rebuild
+  }, '')
+}
+
+/** What the background reader is doing, a Pause button, and the battery rule. */
+function bgField(snap) {
+  const f = h(`<div class="field" id="bg"><h3>${T.set_bg}</h3><p>${T.set_bg_p}</p>
+    <div class="bgline"><span class="dot"></span><span class="bgtxt"></span><button class="btn small" id="bg-pause"></button></div>
+    ${toggleRow('battery', T.set_battery, T.set_battery_p, snap.config.pause_on_battery !== false)}</div>`)
+  $('#bg-pause', f).onclick = async () => { state.hold = await api.setPaused(state.hold !== 'user'); drawBg(); setLive(state.snapshot) }
+  $('.switch', f).onclick = async e => {
+    const sw = e.currentTarget, on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
+    const cfg = await api.setOptions({ pauseOnBattery: on }); state.snapshot.config = { ...state.snapshot.config, ...cfg }
+  }
+  setTimeout(drawBg)
+  return f
+}
+function drawBg() {
+  const f = $('#bg'); if (!f) return
+  const busy = state.reading ? T.bg_reading(fmt(state.reading.done), fmt(state.reading.total))
+    : state.learning ? T.bg_learning(fmt(state.learning.done), fmt(state.learning.total)) : ''
+  $('.bgtxt', f).textContent = state.hold ? T.hold[state.hold] : busy || T.bg_idle
+  $('.dot', f).className = 'dot ' + (state.hold ? 'held' : busy ? 'busy' : '')
+  $('#bg-pause', f).textContent = state.hold === 'user' ? T.bg_resume : T.bg_pause
+}
+
+/** Folder names and *.ext patterns skipped everywhere. */
+function skipField(items) {
+  const f = h(`<div class="field"><h3>${T.set_skip}</h3><p>${T.set_skip_p}</p><div class="tags"></div>
+    <input class="tagin" spellcheck="false" placeholder="${esc(T.set_skip_ph)}" /></div>`)
+  const save = () => api.setExcludedNames(items).then(cfg => { state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted() })
+  const draw = () => {
+    $('.tags', f).innerHTML = items.map((x, i) => `<span class="tag ${x.startsWith('*.') ? 'ext' : ''}">${esc(x)}<button data-i="${i}">${ICON.x}</button></span>`).join('')
+    $('.tags', f).querySelectorAll('button').forEach(b => b.onclick = () => { items.splice(Number(b.dataset.i), 1); draw(); save() })
+  }
+  const inp = $('.tagin', f)
+  inp.onkeydown = e => {
+    if (e.key !== 'Enter') return
+    let v = inp.value.trim().replace(/^\.(?=\w+$)/, '*.')
+    if (v && !items.includes(v)) { items.push(v); draw(); save() }
+    inp.value = ''
+  }
+  draw(); return f
 }
 
 function toggleRow(k, title, p, on) {
@@ -587,7 +644,7 @@ function updateBanner(u) {
   $('[data-a="go"]', b).onclick = async e => {
     e.currentTarget.disabled = true; $('[data-a="later"]', b).remove()
     api.on('update-progress', p => { $('.upd-txt span', b).textContent = T.upd_progress(Math.round(p * 100)) })
-    try { await api.installUpdate() } catch { toast(T.upd_fail); b.remove() }
+    try { await api.installUpdate() } catch { b.remove(); toast(T.upd_fail, { label: T.retry, run: () => updateBanner(u) }) }
   }
   document.body.append(b)
 }
@@ -619,10 +676,13 @@ function menu(x, y, path) {
 function closeMenuOutside(e) { if (!e.target.closest('#menu')) closeMenu() }
 function closeMenu() { $('#menu')?.remove(); removeEventListener('mousedown', closeMenuOutside) }
 
-function toast(text) {
+/** A short note in the corner; with an action ({ label, run }) it stays longer and offers a fix. */
+function toast(text, action) {
   if (!text) return
-  const t = h(`<div class="toast"><i></i>${esc(text)}</div>`); $('#toasts').append(t)
-  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 400) }, 2600)
+  const t = h(`<div class="toast ${action ? 'act' : ''}"><i></i>${esc(text)}${action ? `<button>${esc(action.label)}</button>` : ''}</div>`); $('#toasts').append(t)
+  const close = () => { t.classList.add('out'); setTimeout(() => t.remove(), 400) }
+  if (action) $('button', t).onclick = () => { close(); action.run() }
+  setTimeout(close, action ? 8000 : 2600)
 }
 
 // ------------------------------------------------------------ keyboard ---
@@ -647,14 +707,16 @@ addEventListener('keydown', e => {
 // ------------------------------------------------------------ live status
 function setLive(snap) {
   const live = $('#live')
-  live.classList.toggle('scanning', state.scanning)
+  live.classList.toggle('scanning', state.scanning || (!!(state.reading || state.learning) && !state.hold))
+  live.classList.toggle('held', !state.scanning && !!state.hold && !!(state.reading || state.learning))
   $('#rescan').classList.toggle('spin', state.scanning)
   tween($('#live-count'), snap?.status?.files ?? 0, { format: n => T.files(fmt(n)) })
   $('#live-sub').textContent = state.scanning ? T.live_scanning
+    : state.hold && (state.reading || state.learning) ? T.hold[state.hold]
     : state.reading ? T.live_reading(fmt(state.reading.done), fmt(state.reading.total))
     : snap?.status?.last_scan_at ? `${T.live_watching} · ${ago(snap.status.last_scan_at)}` : T.live_watching
 }
-async function refreshSnapshot() { const s = await api.snapshot(); state.snapshot = s; state.home = s.home; state.scanning = s.scanning; if (!s.reading) state.reading = null; setLive(s); return s }
+async function refreshSnapshot() { const s = await api.snapshot(); state.snapshot = s; state.home = s.home; state.scanning = s.scanning; state.hold = s.hold || null; if (!s.reading) state.reading = null; setLive(s); return s }
 function scanStarted() { state.scanning = true; setLive(state.snapshot) }
 
 // ------------------------------------------------------------ stage ------
@@ -683,9 +745,12 @@ let radar
 function scanningStage() {
   const el = h(`<div class="wrap"><div class="radar"><canvas width="600" height="600"></canvas></div>
     <div class="counter" id="sc-n">0</div><div class="counter-sub" id="sc-sub">${T.scan_title}</div>
-    <div class="ticker" id="sc-t"></div><div class="scan-actions"><button class="btn" id="sc-x">${T.scan_cancel}</button></div></div>`)
+    <div class="ticker" id="sc-t"></div><div class="scan-actions"><button class="btn primary" id="sc-go" hidden>${T.scan_browse}</button><button class="btn" id="sc-x">${T.scan_cancel}</button></div>
+    <p class="fine" id="sc-go-p" hidden>${T.scan_browse_p}</p></div>`)
   showStage(el)
   $('#sc-x').onclick = () => api.cancelScan()
+  // Search works while the first scan runs: every batch is committed as it goes.
+  $('#sc-go').onclick = () => { radar?.stop(); state.view = 'search'; movePill(); hideStage() }
   radar = new Radar($('canvas', el))
 }
 function onProgress(p) {
@@ -693,6 +758,7 @@ function onProgress(p) {
   if ($('#stage').hidden) { $('#live-sub').textContent = `${T.live_scanning} ${fmt(p.files_found)}`; return }
   const n = $('#sc-n'); if (!n) return
   n.textContent = fmt(p.files_found)
+  if (p.files_found >= 2000 && $('#sc-go').hidden) { $('#sc-go').hidden = false; $('#sc-go-p').hidden = false }
   const rate = p.elapsed_ms ? Math.round(p.files_found / (p.elapsed_ms / 1000)) : 0
   $('#sc-sub').textContent = T.scan_sub(fmt(p.dirs), fmt(rate))
   $('#sc-t').innerHTML = `<span style="direction:ltr;unicode-bidi:plaintext">${esc(shortPath(p.current || ''))}</span>`
@@ -702,7 +768,8 @@ async function onDone(r) {
   state.scanning = false
   const snap = await refreshSnapshot()
   if ($('#stage').hidden || !$('#sc-n')) {
-    if (!r.full && (r.added || r.changed || r.removed)) toast(T.toast_scan(r.added, r.changed, r.removed))
+    if (r.full && !r.cancelled) toast(T.done_toast(fmt(snap.status.files)))
+    else if (!r.full && (r.added || r.changed || r.removed)) toast(T.toast_scan(r.added, r.changed, r.removed))
     if (state.view === 'search') runSearch(true)
     return
   }
@@ -713,8 +780,15 @@ async function onDone(r) {
   const el = h(`<div class="wrap"><div class="hero-orb"><div class="ring"></div><div class="ring"></div><div class="core"></div></div>
     <h1>${T.done_title(`<span id="dn">0</span>`)}</h1><p class="lede">${T.done_sub(fmt(r.dirs || folders))}</p>
     <div class="donecards">${top.map((k, i) => `<div style="--c:${kc(k.kind)};animation-delay:${300 + i * 80}ms"><b>${fmt(k.files)}</b><span>${T.kind[k.kind]}</span></div>`).join('')}</div>
+    <div class="try" id="dn-try"></div>
     <button class="btn primary big" id="dn-go">${T.done_go}</button><p class="fine">${T.done_hint}</p></div>`)
   showStage(el)
+  // Searches to try, made from the user's own files ("nzzj" → 年终总结.key).
+  const sug = await api.suggestions().catch(() => [])
+  const tries = [...sug.slice(0, 2).map(x => [x.query, x.name]), ['kind:pdf >10mb', T.try_kind]]
+  $('#dn-try').innerHTML = `<span>${T.try_title}</span>` + tries.map(([q, n], i) =>
+    `<button data-q="${esc(q)}" style="animation-delay:${700 + i * 90}ms"><kbd>${esc(q)}</kbd><em>→</em>${esc(n)}</button>`).join('')
+  $('#dn-try').querySelectorAll('button').forEach(b => b.onclick = () => { state.query = b.dataset.q; state.kinds.clear(); state.view = 'search'; movePill(); hideStage() })
   tween($('#dn'), snap.status.files, { dur: 1400 })
   $('#dn-go').onclick = () => { state.view = 'search'; movePill(); hideStage() }
 }
@@ -767,12 +841,14 @@ async function boot() {
   $('#rescan').onclick = () => api.startScan().then(scanStarted)
   await api.on('scan://progress', onProgress)
   await api.on('scan://done', onDone)
-  await api.on('scan://error', e => { state.scanning = false; toast(String(e)) })
+  await api.on('scan://error', () => { state.scanning = false; setLive(state.snapshot); toast(T.scan_err, { label: T.retry, run: () => api.startScan().then(scanStarted) }) })
+  await api.on('pace://hold', hld => { state.hold = hld || null; setLive(state.snapshot); drawBg() })
   await api.on('index://changed', async b => { toast(T.toast_changed(b.upserted, b.removed)); await refreshSnapshot(); if (state.view === 'search') runSearch(true) })
   await api.on('content://progress', p => {
     state.reading = p.finished ? null : p
     const live = $('#live'); live.classList.toggle('scanning', !!state.reading || state.scanning)
-    if (!state.scanning) $('#live-sub').textContent = state.reading ? T.live_reading(fmt(p.done), fmt(p.total)) : T.live_watching
+    if (!state.scanning) setLive(state.snapshot)
+    drawBg()
   })
   await api.on('content://done', async r => {
     state.reading = null; const s = await refreshSnapshot()
@@ -780,7 +856,7 @@ async function boot() {
     if (state.view === 'search' && state.query) runSearch(true)
   })
   await api.on('semantic://progress', p => {
-    state.learning = p.finished || !p.total ? null : p
+    state.learning = p.finished || !p.total ? null : p; drawBg()
     if (state.view === 'search' && state.semantic && $('#meta') && state.learning) $('#meta').textContent = T.sem_learning(fmt(p.done), fmt(p.total))
   })
   await api.on('semantic://done', async () => { state.learning = null; await refreshSnapshot(); if (state.view === 'search' && state.semantic) runSearch(true) })
@@ -801,7 +877,8 @@ async function boot() {
   if (!isApp && location.hash.includes('update')) setTimeout(async () => updateBanner(await api.checkUpdate()), 600)
   const snap = await refreshSnapshot()
   applyTheme(!isApp && /light|dark/.test(location.hash) ? location.hash.match(/light|dark/)[0] : snap.config.theme)
-  if (snap.firstRun) onboarding()
+  if (snap.indexRebuilt) { state.scanning = true; setLive(snap); render(); toast(T.index_rebuilt) }
+  else if (snap.firstRun) onboarding()
   else { render(); openLink(await api.takeLink()) }
   // demo hooks for previews: #scan, #done, #insights …
   const hash = location.hash.slice(1)

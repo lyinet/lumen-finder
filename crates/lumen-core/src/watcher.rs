@@ -91,7 +91,7 @@ impl Watcher {
                         let mut content_read = 0;
                         if content && upserted > 0 {
                             let never = Arc::new(AtomicBool::new(false));
-                            match crate::content::index_pending(&mut conn, &never, |_| {}) {
+                            match crate::content::index_pending(&mut conn, &never, false, |_| {}) {
                                 Ok(r) => content_read = r.read,
                                 Err(e) => log::warn!("content update failed: {e}"),
                             }

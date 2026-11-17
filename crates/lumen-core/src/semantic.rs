@@ -19,7 +19,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -129,12 +129,10 @@ impl Embedder for HelperEmbedder {
     fn embed(&self, items: &[(Model, String)]) -> Result<Vec<Option<Vec<f32>>>> {
         use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};
-        let mut child = Command::new(&self.bin)
-            .arg("embed")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("embed").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        crate::pace::background_command(&mut cmd);
+        let mut child = cmd.spawn()?;
         let mut input = String::new();
         for (m, t) in items {
             let clean: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
@@ -302,7 +300,7 @@ pub fn index_semantic(
     let mut done = 0u64;
     on_progress(&SemanticProgress { done, total, finished: total == 0 });
     for chunk in jobs.chunks(BATCH) {
-        if cancel.load(Ordering::Relaxed) {
+        if !crate::pace::wait(&cancel) {
             report.cancelled = true;
             break;
         }

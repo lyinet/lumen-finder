@@ -6,8 +6,9 @@
 // menu bar icon and the configurable summon hotkey.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use lumen_core::pace::{self, Hold};
 use lumen_core::{
-    index_content, index_semantic, scan, semantic_search, set_embed_helper, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Kind, MonthStat, Overview,
+    index_content, index_semantic, scan, semantic_search, set_embed_helper, set_ocr_helper, CollectionStat, Config, DuplicateGroup, FileRecord, Index, IndexStatus, Kind, MonthStat, Overview, Suggestion,
     SearchRequest, SearchResponse, SemanticRequest, SemanticResponse, Watcher,
 };
 use serde::Serialize;
@@ -32,6 +33,8 @@ struct AppState {
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
     embedding: Arc<AtomicBool>,
+    /// The index file was damaged at launch and has been started over (v0.8).
+    rebuilt: AtomicBool,
 }
 
 type Res<T> = Result<T, String>;
@@ -57,6 +60,10 @@ struct Snapshot {
     semantic_ready: bool,
     /// Files with a vector.
     semantic_files: i64,
+    /// Why background reading is holding still, if it is (v0.8).
+    hold: Option<Hold>,
+    /// The index was damaged and is being rebuilt: say so once, skip onboarding.
+    index_rebuilt: bool,
 }
 
 #[tauri::command]
@@ -73,6 +80,8 @@ fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
         version: app.package_info().version.to_string(),
         semantic_ready: lumen_core::semantic::available(),
         semantic_files: lumen_core::semantic::semantic_count(&state.index).unwrap_or(0),
+        hold: pace::hold(),
+        index_rebuilt: state.rebuilt.swap(false, Ordering::Relaxed),
     })
 }
 
@@ -152,6 +161,19 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
                 Ok(report) => {
                     let _ = app.emit("scan://done", &report);
                     restart_watcher(&app);
+                    // Warm the whole-index summaries while the user is still
+                    // reading the scan result, so Insights, Timeline and the
+                    // collections open instantly (they stay cached until the
+                    // index changes).
+                    if !report.cancelled {
+                        let warm = index.clone();
+                        let _ = std::thread::Builder::new().name("lumen-warm".into()).spawn(move || {
+                            pace::background_thread();
+                            let _ = warm.overview();
+                            let _ = warm.collections();
+                            let _ = warm.timeline(1);
+                        });
+                    }
                     if !report.cancelled && cfg.content_search {
                         run_content(&app);
                     } else if !report.cancelled {
@@ -189,6 +211,7 @@ fn run_content(app: &AppHandle) {
     let reading = state.reading.clone();
     let app = app.clone();
     let _ = std::thread::Builder::new().name("lumen-content".into()).spawn(move || {
+        pace::background_thread();
         let emitter = app.clone();
         let r = index_content(&index, cancel.clone(), |p| {
             let _ = emitter.emit("content://progress", p);
@@ -275,6 +298,67 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
     };
     run_scan(&app, &state)?;
     Ok(cfg)
+}
+
+/// Folder names and "*.ext" patterns to skip (v0.8).
+#[tauri::command]
+fn set_excluded_names(app: AppHandle, state: State<AppState>, names: Vec<String>) -> Res<Config> {
+    let cfg = {
+        let mut cfg = state.config.lock().unwrap();
+        let mut names: Vec<String> = names.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
+        names.dedup();
+        cfg.excluded_names = names;
+        cfg.save(&state.config_path).map_err(err)?;
+        cfg.clone()
+    };
+    run_scan(&app, &state)?;
+    Ok(cfg)
+}
+
+/// Pause or resume background reading (text, OCR, vectors).
+#[tauri::command]
+fn set_paused(app: AppHandle, on: bool) -> Option<Hold> {
+    pace::set_paused(on);
+    let h = pace::hold();
+    let _ = app.emit("pace://hold", h);
+    h
+}
+
+/// Searches to try after the first scan, from the user's own files.
+#[tauri::command]
+fn suggestions(state: State<AppState>) -> Res<Vec<Suggestion>> {
+    state.index.suggestions(3).map_err(err)
+}
+
+#[tauri::command]
+fn recently_opened(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
+    state.index.recently_opened(limit.unwrap_or(20)).map_err(err)
+}
+
+/// Start the index over from nothing: stop all work, forget every row, scan.
+#[tauri::command]
+async fn rebuild_index(app: AppHandle) -> Res<()> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        for slot in [&state.cancel, &state.read_cancel] {
+            if let Some(c) = slot.lock().unwrap().as_ref() {
+                c.store(true, Ordering::Relaxed);
+            }
+        }
+        *state.watcher.lock().unwrap() = None;
+        // Let running passes notice the cancel and let go of the database.
+        for _ in 0..200 {
+            if !state.scanning.load(Ordering::SeqCst) && !state.reading.load(Ordering::SeqCst) && !state.embedding.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        state.index.reset().map_err(err)?;
+        run_scan(&handle, &state)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Smart collections and how many files each holds.
@@ -376,6 +460,7 @@ fn set_options(
     auto_update: Option<bool>,
     semantic: Option<bool>,
     include_icloud: Option<bool>,
+    pause_on_battery: Option<bool>,
 ) -> Res<Config> {
     if let Some(on) = launch_at_login {
         let al = app.autolaunch();
@@ -407,6 +492,11 @@ fn set_options(
         }
         if let Some(v) = include_icloud {
             cfg.include_icloud = v;
+        }
+        if let Some(v) = pause_on_battery {
+            cfg.pause_on_battery = v;
+            pace::set_pause_on_battery(v);
+            let _ = app.emit("pace://hold", pace::hold());
         }
         if let Some(v) = semantic {
             cfg.semantic = v;
@@ -635,6 +725,7 @@ fn existing(state: &AppState, path: &str) -> Res<()> {
 fn open_path(state: State<AppState>, path: String) -> Res<()> {
     existing(&state, &path)?;
     Command::new("open").arg(&path).spawn().map_err(err)?;
+    let _ = state.index.record_open(&path);
     Ok(())
 }
 
@@ -642,6 +733,7 @@ fn open_path(state: State<AppState>, path: String) -> Res<()> {
 fn reveal(state: State<AppState>, path: String) -> Res<()> {
     existing(&state, &path)?;
     Command::new("open").args(["-R", &path]).spawn().map_err(err)?;
+    let _ = state.index.record_open(&path);
     Ok(())
 }
 
@@ -738,8 +830,11 @@ fn main() {
             let config = Config::load(&config_path);
             use_ocr(config.ocr);
             use_semantic(config.semantic);
-            let index = Arc::new(Index::open(data.join("index.db"))?);
-            let had_index = index.status().map(|s| s.generation > 0).unwrap_or(false);
+            pace::set_pause_on_battery(config.pause_on_battery);
+            // A damaged index is set aside and rebuilt rather than failing to launch.
+            let (index, rebuilt) = Index::open_or_reset(data.join("index.db"))?;
+            let index = Arc::new(index);
+            let had_index = rebuilt || index.status().map(|s| s.generation > 0).unwrap_or(false);
 
             app.manage(AppState {
                 index,
@@ -751,7 +846,25 @@ fn main() {
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
                 embedding: Arc::new(AtomicBool::new(false)),
+                rebuilt: AtomicBool::new(rebuilt),
             });
+
+            // Tell the UI when background reading starts or stops holding
+            // (power cable, Low Power Mode, Pause).
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut last = pace::hold();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        let now = pace::hold();
+                        if now != last {
+                            last = now;
+                            let _ = handle.emit("pace://hold", now);
+                        }
+                    }
+                });
+            }
 
             let hotkey = app.state::<AppState>().config.lock().unwrap().hotkey.clone();
             match hotkey.parse::<Shortcut>() {
@@ -823,6 +936,11 @@ fn main() {
             cancel_scan,
             set_roots,
             set_excluded,
+            set_excluded_names,
+            set_paused,
+            suggestions,
+            recently_opened,
+            rebuild_index,
             set_options,
             set_hotkey,
             trash_paths,

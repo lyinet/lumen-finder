@@ -48,41 +48,42 @@ const FORGOTTEN_MIN_SIZE: i64 = 50 * 1024 * 1024;
 
 impl Index {
     pub fn overview(&self) -> Result<Overview> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare_cached(
-            "SELECT kind, count(*), coalesce(sum(size),0), count(DISTINCT parent)
-             FROM files GROUP BY kind ORDER BY sum(size) DESC",
-        )?;
-        let kinds = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
-            .flatten()
-            .filter_map(|(k, files, bytes, folders)| {
-                Kind::from_i64(k).map(|kind| KindStat { kind, files, bytes, folders })
-            })
-            .collect();
+        self.memo("overview", |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT kind, count(*), coalesce(sum(size),0), count(DISTINCT parent)
+                 FROM files GROUP BY kind ORDER BY sum(size) DESC",
+            )?;
+            let kinds = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .flatten()
+                .filter_map(|(k, files, bytes, folders)| {
+                    Kind::from_i64(k).map(|kind| KindStat { kind, files, bytes, folders })
+                })
+                .collect();
 
-        let mut stmt = conn.prepare_cached(
-            "SELECT parent, count(*), sum(size) FROM files GROUP BY parent ORDER BY count(*) DESC LIMIT 8",
-        )?;
-        let top_folders = stmt
-            .query_map([], |r| Ok(FolderStat { path: r.get(0)?, files: r.get(1)?, bytes: r.get(2)? }))?
-            .flatten()
-            .collect();
+            let mut stmt = conn.prepare_cached(
+                "SELECT parent, count(*), sum(size) FROM files GROUP BY parent ORDER BY count(*) DESC LIMIT 8",
+            )?;
+            let top_folders = stmt
+                .query_map([], |r| Ok(FolderStat { path: r.get(0)?, files: r.get(1)?, bytes: r.get(2)? }))?
+                .flatten()
+                .collect();
 
-        let week = now() - 7 * 86_400;
-        let (added_7d, changed_7d): (i64, i64) = conn.query_row(
-            "SELECT coalesce(sum(ctime >= ?1),0), coalesce(sum(mtime >= ?1),0) FROM files",
-            [week],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let (forgotten_files, forgotten_bytes): (i64, i64) = conn.query_row(
-            "SELECT count(*), coalesce(sum(size),0) FROM files WHERE mtime < ?1 AND size >= ?2",
-            params![now() - FORGOTTEN_AFTER_SECS, FORGOTTEN_MIN_SIZE],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok(Overview { kinds, top_folders, added_7d, changed_7d, forgotten_files, forgotten_bytes })
+            let week = now() - 7 * 86_400;
+            let (added_7d, changed_7d): (i64, i64) = conn.query_row(
+                "SELECT coalesce(sum(ctime >= ?1),0), coalesce(sum(mtime >= ?1),0) FROM files",
+                [week],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let (forgotten_files, forgotten_bytes): (i64, i64) = conn.query_row(
+                "SELECT count(*), coalesce(sum(size),0) FROM files WHERE mtime < ?1 AND size >= ?2",
+                params![now() - FORGOTTEN_AFTER_SECS, FORGOTTEN_MIN_SIZE],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(Overview { kinds, top_folders, added_7d, changed_7d, forgotten_files, forgotten_bytes })
+        })
     }
 
     fn records(&self, sql_tail: &str, args: impl rusqlite::Params) -> Result<Vec<FileRecord>> {

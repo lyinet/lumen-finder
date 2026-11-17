@@ -10,7 +10,8 @@ pub struct Config {
     pub roots: Vec<PathBuf>,
     /// Absolute folders never entered (user choice, on top of the built-ins).
     pub excluded_paths: Vec<PathBuf>,
-    /// Folder names never entered, anywhere.
+    /// Folder names never entered, anywhere. An entry like "*.log" (v0.8)
+    /// skips every file with that extension instead.
     pub excluded_names: Vec<String>,
     /// Smallest file worth indexing, in bytes (skips thumbnails, stubs).
     pub min_size: u64,
@@ -39,6 +40,8 @@ pub struct Config {
     /// Index iCloud Drive (~/Library/Mobile Documents/com~apple~CloudDocs),
     /// downloaded or not. Files not on this Mac are listed, never opened.
     pub include_icloud: bool,
+    /// Hold background reading (text, OCR, vectors) while on battery (v0.8).
+    pub pause_on_battery: bool,
 }
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -191,6 +194,7 @@ impl Default for Config {
             auto_update: true,
             semantic: true,
             include_icloud: true,
+            pause_on_battery: true,
         }
     }
 }
@@ -300,7 +304,8 @@ impl PathFilter {
         // An iCloud Drive file that is not downloaded (".报告.pdf.icloud"):
         // kept under its real name, whatever the hidden-files setting.
         if let Some(real) = icloud_placeholder(name) {
-            return crate::Kind::from_ext(Path::new(real).extension()?.to_str()?);
+            let ext = Path::new(real).extension()?.to_str()?;
+            return if self.excluded_ext(ext) { None } else { crate::Kind::from_ext(ext) };
         }
         if !self.include_hidden && name.starts_with('.') {
             return None;
@@ -309,7 +314,17 @@ impl PathFilter {
             return None; // Office lock files
         }
         let ext = path.extension()?.to_str()?;
+        if self.excluded_ext(ext) {
+            return None;
+        }
         crate::Kind::from_ext(ext)
+    }
+
+    fn excluded_ext(&self, ext: &str) -> bool {
+        self.excluded_names
+            .iter()
+            .filter_map(|n| n.strip_prefix("*."))
+            .any(|e| e.eq_ignore_ascii_case(ext))
     }
 
     /// Big enough to keep? Files still in iCloud are always kept: their
@@ -379,6 +394,14 @@ mod tests {
         assert_eq!(f.classify_file(Path::new("/x/.报告.pdf.icloud")), Some(crate::Kind::Pdf));
         assert_eq!(icloud_placeholder(".报告.pdf.icloud"), Some("报告.pdf"));
         assert_eq!(icloud_placeholder(".icloud"), None);
+        let mut cfg = Config { roots: vec![PathBuf::from("/")], ..Config::default() };
+        cfg.excluded_names.push("*.MOV".into());
+        cfg.excluded_names.push("素材缓存".into());
+        let f = cfg.filter();
+        assert!(f.classify_file(Path::new("/x/a.mov")).is_none());
+        assert!(f.classify_file(Path::new("/x/.a.mov.icloud")).is_none());
+        assert!(f.classify_file(Path::new("/x/a.mp4")).is_some());
+        assert!(!f.allow_dir(Path::new("/Users/a/Movies/素材缓存")));
         assert_eq!(icloud_placeholder("a.icloud"), None);
     }
 

@@ -423,3 +423,33 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 .tips .sem-try { display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-size: 12.5px; border-style: solid; border-color: transparent; color: #0b0b14; background: var(--accent-grad); }
 .tips .sem-try svg { width: 13px; height: 13px; fill: currentColor; }
 .view.semantic .searchbar > svg { color: #c08bff; }
+
+/* v0.8: notices, actionable toasts, background work, skip tags, first-search tries */
+.notice { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; padding: 8px 8px 8px 12px; border-radius: 12px; font-size: 12.5px; color: var(--text-2); border: 1px solid color-mix(in srgb, var(--accent-2) 38%, transparent); background: color-mix(in srgb, var(--accent-2) 9%, transparent); animation: rowIn .4s var(--ease) both; }
+.notice > svg { width: 16px; height: 16px; color: var(--accent-2); flex: none; }
+.notice span { flex: 1; }
+.toast.act { padding-right: 6px; }
+.toast button { margin-left: 6px; height: 24px; padding: 0 10px; border-radius: 7px; font-size: 12px; font-weight: 600; color: #fff; background: rgba(255,255,255,.14); }
+.toast button:hover { background: rgba(255,255,255,.24); }
+.bgline { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 10px; font-size: 12.5px; }
+.bgline .bgtxt { flex: 1; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.bgline .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.bgline .dot.busy { background: var(--ok); box-shadow: 0 0 10px var(--ok); animation: bgpulse 1.6s ease-in-out infinite; }
+.bgline .dot.held { background: #fbbf24; box-shadow: 0 0 10px #fbbf24; }
+@keyframes bgpulse { 50% { opacity: .35; } }
+#live.held #live-sub { color: #fbbf24; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.tag { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 4px 0 10px; border-radius: 8px; font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--line); animation: rowIn .3s var(--ease) both; }
+.tag.ext { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 35%, transparent); }
+.tag button { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; color: var(--text-3); }
+.tag button:hover { color: #f87171; background: var(--panel-2); }
+.tag button svg { width: 11px; height: 11px; }
+.tagin { width: 100%; height: 32px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; outline: none; }
+.tagin:focus { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.try { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px; margin: -4px auto 22px; max-width: 620px; }
+.try > span { width: 100%; text-align: center; color: var(--text-3); font-size: 12px; margin-bottom: 2px; }
+.try button { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 10px; font-size: 12.5px; color: var(--text-2); background: var(--panel); border: 1px solid var(--line); animation: rowIn .45s var(--spring) both; transition: all .25s var(--spring); }
+.try button:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, transparent); transform: translateY(-1px); }
+.try kbd { font-family: var(--mono); font-size: 12px; color: var(--accent-2); }
+.try em { font-style: normal; color: var(--text-3); }
+.scan-actions { display: flex; gap: 10px; justify-content: center; }

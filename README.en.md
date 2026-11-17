@@ -25,6 +25,15 @@
 
 <br>
 
+## ✦ New in v0.8: smoother and quieter
+
+- **Search during the first scan** — after 2,000 files, "Start searching now"; the scan carries on in the background, and the done screen suggests searches made from your own files.
+- **Background work that saves your battery** — document reading and OCR run at background priority and pause on battery, in Low Power Mode or when you press Pause.
+- **Errors with a fix** — missing access, a stopped scan or a failed update each come with "Grant access" or "Retry"; a damaged index rebuilds itself.
+- **What you open ranks first** — files opened from Lumen in the last 30 days lead their tier.
+- **Custom skips** — folder names or `*.log`-style types in Settings.
+- **Load-tested at 300,000 files** — keyword searches scan once, 2–20× faster on big indexes.
+
 ## ✦ New in v0.7: Lumen from anywhere, iCloud Drive
 
 <p align="center">

@@ -90,18 +90,19 @@ pub fn rule(id: &str) -> Option<&'static Rule> {
 impl Index {
     /// How many files each collection holds right now.
     pub fn collections(&self) -> Result<Vec<CollectionStat>> {
-        let conn = self.conn();
-        let mut out = Vec::with_capacity(RULES.len());
-        for r in RULES {
-            let (w, args) = r.filter();
-            let (files, bytes, latest) = conn.query_row(
-                &format!("SELECT count(*), coalesce(sum(f.size),0), coalesce(max(f.mtime),0) FROM files f WHERE {w}"),
-                rusqlite::params_from_iter(args),
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            out.push(CollectionStat { id: r.id, files, bytes, latest });
-        }
-        Ok(out)
+        self.memo("collections", |conn| {
+            let mut out = Vec::with_capacity(RULES.len());
+            for r in RULES {
+                let (w, args) = r.filter();
+                let (files, bytes, latest) = conn.query_row(
+                    &format!("SELECT count(*), coalesce(sum(f.size),0), coalesce(max(f.mtime),0) FROM files f WHERE {w}"),
+                    rusqlite::params_from_iter(args),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                out.push(CollectionStat { id: r.id, files, bytes, latest });
+            }
+            Ok(out)
+        })
     }
 
     /// One collection's files, newest first.
