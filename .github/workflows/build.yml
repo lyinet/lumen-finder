@@ -104,6 +104,26 @@ jobs:
           A=target/universal-apple-darwin/release/bundle/macos/Lumen.app
           test -x "$A/Contents/MacOS/lumen"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$A/Contents/Info.plist" | grep -qx lumen
+          # The signature covers everything in the bundle (a broken one gets the
+          # app killed at launch on Apple silicon).
+          codesign --verify --deep --strict --verbose=2 "$A"
+      - name: Launch smoke test (first launch, relaunch on the existing index, second instance)
+        working-directory: app/src-tauri
+        run: |
+          A=target/universal-apple-darwin/release/bundle/macos/Lumen.app
+          EXE="$A/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$A/Contents/Info.plist")"
+          LOG="$HOME/Library/Logs/app.lumen.desktop/Lumen.log"
+          alive() { sleep "$2"; kill -0 "$1" 2>/dev/null || { echo "::error::Lumen exited ($3)"; cat "$LOG" 2>/dev/null; exit 1; }; }
+          "$EXE" & P=$!; alive $P 15 "first launch"
+          kill $P; wait $P 2>/dev/null || true; sleep 2
+          "$EXE" & P=$!; alive $P 15 "second launch, existing index"
+          # A second copy hands over to the running one and exits.
+          "$EXE" & Q=$!; sleep 8
+          if kill -0 $Q 2>/dev/null; then echo "::error::two Lumen processes running"; exit 1; fi
+          alive $P 1 "after a second instance"
+          kill $P; wait $P 2>/dev/null || true
+          grep -q "index open" "$LOG" || { echo "::error::no launch log"; cat "$LOG"; exit 1; }
+          cat "$LOG"
       - name: Update manifest (latest.json)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

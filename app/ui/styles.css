@@ -453,3 +453,17 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
 .try kbd { font-family: var(--mono); font-size: 12px; color: var(--accent-2); }
 .try em { font-style: normal; color: var(--text-3); }
 .scan-actions { display: flex; gap: 10px; justify-content: center; }
+
+/* v0.8.1: Full Disk Access guide */
+.modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(8, 7, 16, .55); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); animation: fadeIn .25s var(--ease) both; }
+.modal-card { width: min(520px, calc(100vw - 48px)); padding: 22px; border-radius: 18px; background: var(--panel-2); border: 1px solid var(--line-2); box-shadow: 0 40px 80px -30px rgba(0,0,0,.8); animation: toastIn .45s var(--spring) both; }
+.modal-card h3 { font-size: 15px; font-weight: 650; margin: 12px 0 10px; }
+.modal-card ol { margin: 0 0 14px 18px; padding: 0; color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
+.modal-card li + li { margin-top: 6px; }
+.fda-state { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-3); margin: 0 0 16px; }
+.fda-state .dot { width: 8px; height: 8px; border-radius: 50%; background: #fbbf24; animation: bgpulse 1.6s ease-in-out infinite; }
+.modal.granted .fda-state { color: var(--ok); }
+.modal.granted .fda-state .dot { background: var(--ok); animation: none; box-shadow: 0 0 10px var(--ok); }
+.modal-acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.modal-acts .grow { flex: 1; }
+@keyframes fadeIn { from { opacity: 0; } }

@@ -118,7 +118,7 @@ function viewSearch(v) {
   const snap = state.snapshot
   if (snap && !snap.fullDiskAccess && !snap.firstRun && !sessionStorage.getItem('fda-later')) {
     const b = h(`<div class="notice">${ICON.shield}<span>${T.fda_banner}</span><button class="btn small primary">${T.fda_fix}</button><button class="btn small" data-a="later">${T.later}</button></div>`)
-    $('.primary', b).onclick = () => api.openFdaSettings()
+    $('.primary', b).onclick = () => grantFda()
     $('[data-a="later"]', b).onclick = () => { sessionStorage.setItem('fda-later', '1'); b.remove() }
     v.append(b)
   }
@@ -608,10 +608,39 @@ function skipField(items) {
 function toggleRow(k, title, p, on) {
   return `<div class="toggle"><div><b>${title}</b><p>${p}</p></div><button class="switch ${on ? 'on' : ''}" data-k="${k}"><i></i></button></div>`
 }
+/** Open System Settings at Full Disk Access and stay with the user until the
+ *  switch is on: what to do, a way to drag Lumen in when it is not listed,
+ *  and a Reopen button once access is granted. */
+let fdaPoll
+async function grantFda() {
+  await api.openFdaSettings()
+  $('#fda-guide')?.remove(); clearInterval(fdaPoll)
+  const m = h(`<div class="modal" id="fda-guide"><div class="modal-card"><div class="fda-icon">${ICON.shield}</div>
+    <h3>${T.fda_g_title}</h3><ol><li>${T.fda_g_1}</li><li>${T.fda_g_2}</li><li>${T.fda_g_3}</li></ol>
+    <p class="fda-state"><span class="dot"></span><span>${T.fda_g_wait}</span></p>
+    <div class="modal-acts"><button class="btn small" data-a="reveal">${T.fda_g_reveal}</button><button class="btn small" data-a="again">${T.fda_g_again}</button>
+    <span class="grow"></span><button class="btn small" data-a="later">${T.later}</button><button class="btn small primary" data-a="relaunch">${T.fda_g_relaunch}</button></div></div></div>`)
+  document.body.append(m)
+  const close = () => { clearInterval(fdaPoll); m.remove() }
+  m.onclick = e => {
+    const a = e.target.closest('button')?.dataset.a
+    if (a === 'reveal') api.revealApp()
+    else if (a === 'again') api.openFdaSettings()
+    else if (a === 'relaunch') api.relaunch()
+    else if (a === 'later' || e.target === m) close()
+  }
+  fdaPoll = setInterval(async () => {
+    if (!document.body.contains(m)) return clearInterval(fdaPoll)
+    if (await api.fullDiskAccess()) {
+      clearInterval(fdaPoll); m.classList.add('granted'); $('.fda-state span:last-child', m).textContent = T.fda_g_ok
+    }
+  }, 1500)
+}
+
 function fdaCard() {
   const c = h(`<div class="field fda"><div class="fda-icon">${ICON.shield}</div><div><h3>${T.fda_title}</h3><p>${T.fda_p}</p>
     <button class="btn primary">${T.fda_btn}</button></div></div>`)
-  $('.btn', c).onclick = () => api.openFdaSettings()
+  $('.btn', c).onclick = () => grantFda()
   return c
 }
 const KEYNAMES = { Alt: '⌥', Option: '⌥', Cmd: '⌘', Command: '⌘', CmdOrCtrl: '⌘', Super: '⌘', Ctrl: '⌃', Control: '⌃', Shift: '⇧', Space: 'Space' }
@@ -736,7 +765,7 @@ function onboarding() {
     <p class="fine">${T.ob_fine} · <a id="ob-choose">${T.ob_choose}</a></p></div>`)
   showStage(el)
   $('#ob-go').onclick = () => startFirstScan()
-  const fda = $('#ob-fda'); if (fda) fda.onclick = () => api.openFdaSettings()
+  const fda = $('#ob-fda'); if (fda) fda.onclick = () => grantFda()
   $('#ob-choose').onclick = async () => { const p = await api.pickFolder(); if (p) { await api.setRoots([p]); scanningStage() } }
 }
 async function startFirstScan() { scanningStage(); await api.startScan() }
@@ -842,6 +871,7 @@ async function boot() {
   await api.on('scan://progress', onProgress)
   await api.on('scan://done', onDone)
   await api.on('scan://error', () => { state.scanning = false; setLive(state.snapshot); toast(T.scan_err, { label: T.retry, run: () => api.startScan().then(scanStarted) }) })
+  await api.on('index://damaged', () => toast(T.index_damaged, { label: T.rebuild, run: async () => { await api.rebuildIndex(); toast(T.rebuild_started); scanStarted() } }))
   await api.on('pace://hold', hld => { state.hold = hld || null; setLive(state.snapshot); drawBg() })
   await api.on('index://changed', async b => { toast(T.toast_changed(b.upserted, b.removed)); await refreshSnapshot(); if (state.view === 'search') runSearch(true) })
   await api.on('content://progress', p => {

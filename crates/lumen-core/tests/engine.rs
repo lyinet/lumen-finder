@@ -445,6 +445,16 @@ fn damaged_index_is_rebuilt_and_reset_forgets() {
     drop(index);
     let (index, reset) = Index::open_or_reset(&path).unwrap();
     assert!(!reset, "a healthy index opens as is");
+    assert!(index.check_integrity().unwrap());
+    // A second Lumen (or one still quitting) holding the file is not damage:
+    // the index opens alongside it and nothing is set aside.
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE; INSERT INTO meta(key, value) VALUES ('x', '1');").unwrap();
+    let (again, reset) = Index::open_or_reset(&path).unwrap();
+    assert!(!reset);
+    drop(again);
+    holder.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("damaged")).count(), 1);
 
     let (_d, idx2, cfg) = setup();
     scan(&idx2, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();

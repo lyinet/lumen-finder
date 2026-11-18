@@ -276,24 +276,52 @@ impl Index {
     /// cache of the disk, so a rescan rebuilds everything. `true` means it
     /// was rebuilt.
     pub fn open_or_reset(path: impl AsRef<Path>) -> Result<(Index, bool)> {
+        // v0.8.0 ran `PRAGMA quick_check` here, which reads the whole file
+        // before the window can appear: seconds on a big index, and on a busy
+        // or locked file (a previous Lumen still quitting) it failed and set a
+        // healthy index aside. Launch now only opens the file and reads its
+        // schema; it starts over only when SQLite itself says the file is not
+        // a database or is corrupt. `check_integrity` runs the full check
+        // later, in the background.
         let path = path.as_ref();
-        let healthy = |p: &Path| -> Result<Index> {
-            let idx = Index::open(p)?;
-            let ok: String = idx.conn().query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-            anyhow::ensure!(ok == "ok", "index check failed: {ok}");
+        match Index::open(path).and_then(|idx| {
+            idx.conn().query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0))?;
             Ok(idx)
-        };
-        match healthy(path) {
+        }) {
             Ok(idx) => Ok((idx, false)),
-            Err(e) => {
-                log::warn!("index at {} is damaged ({e}); starting a new one", path.display());
-                let aside = path.with_extension(format!("damaged-{}.db", now()));
-                let _ = std::fs::rename(path, &aside);
-                for ext in ["db-wal", "db-shm"] {
-                    let _ = std::fs::remove_file(path.with_extension(ext));
-                }
+            Err(e) if is_corrupt(&e) => {
+                log::warn!("index at {} is damaged ({e:#}); starting a new one", path.display());
+                Index::set_aside(path);
                 Ok((Index::open(path)?, true))
             }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn set_aside(path: &Path) {
+        let aside = path.with_extension(format!("damaged-{}.db", now()));
+        let _ = std::fs::rename(path, &aside);
+        for ext in ["db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(path.with_extension(ext));
+        }
+    }
+
+    /// The full integrity check, for a background thread after launch.
+    /// `Ok(false)` means the index is damaged and should be rebuilt; a busy
+    /// or locked database is an error, never "damaged".
+    pub fn check_integrity(&self) -> Result<bool> {
+        let r: rusqlite::Result<String> = self.conn().query_row("PRAGMA quick_check", [], |r| r.get(0));
+        match r {
+            Ok(ok) => Ok(ok == "ok"),
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -410,7 +438,12 @@ impl Index {
         if !has_cloud {
             conn.execute_batch("ALTER TABLE files ADD COLUMN cloud INTEGER NOT NULL DEFAULT 0;")?;
         }
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // Only write when something changed: a write waits for any other
+        // connection's transaction (a scan still finishing in a Lumen that is
+        // quitting), and launch must not.
+        if version != SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Index { path, conn: Mutex::new(conn), memo: Default::default() })
     }
 
@@ -523,6 +556,17 @@ pub struct IndexStatus {
     pub generation: i64,
     /// Documents whose words are searchable.
     pub content_files: i64,
+}
+
+/// SQLite says the file is not a database, or is corrupt. Busy, locked,
+/// permission and disk-full errors are not damage.
+fn is_corrupt(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>().and_then(|e| e.sqlite_error_code()),
+            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+    })
 }
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection> {

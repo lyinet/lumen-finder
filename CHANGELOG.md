@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.1 — unreleased
+
+Fixes from the first real-Mac test of 0.8.0.
+
+- **Full Disk Access**: Lumen now tries to read a protected file before opening Settings, which is what makes macOS list it under Full Disk Access (it used to be missing from the list). The pane opens at the right address on macOS 13+ (System Settings) and earlier. A guide stays on screen with the steps, “Show Lumen in Finder” to drag it into the list if needed, live detection of the grant, and “Reopen Lumen”.
+- **Lumen would not open again after the first run**: launch no longer runs a full integrity check of the index before the window appears (slow on big indexes, and a busy file — a Lumen still quitting — was mistaken for damage). Opening the index writes nothing unless the schema changed, retries while another process holds it, and only a file SQLite reports as corrupt or not a database is set aside. The full check runs 20 s after launch in the background and offers Rebuild if it fails.
+- **One Lumen at a time** (single-instance): a second launch, e.g. the copy still on the DMG, brings up the running window instead of opening the index twice. Reopen and in-app updates quit first and open Lumen a second later, so the new process never meets the old one.
+- **Dock icon always shows the window** (it used to toggle, hiding a window that was already open).
+- **Log file**: `~/Library/Logs/app.lumen.desktop/Lumen.log` (launch, index state, panics).
+- CI verifies the bundle signature and launches the built app: first launch, relaunch on the existing index, and a second instance.
+
 ## v0.8.0 — 2026-11-18
 
 Polish: first launch, background work, errors with a fix, ranking, custom skips, and a 300 000-file load test.

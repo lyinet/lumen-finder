@@ -431,7 +431,8 @@ async fn install_update(app: AppHandle) -> Res<()> {
         )
         .await
         .map_err(err)?;
-    app.restart();
+    relaunch_soon(&app);
+    Ok(())
 }
 
 /// The Vision OCR helper ships next to the app binary (Contents/MacOS).
@@ -700,13 +701,96 @@ fn has_full_disk_access() -> bool {
     true
 }
 
+/// macOS lists an app under Full Disk Access only after it has tried to
+/// read something that needs it, so try (and fail) first; then Lumen is in
+/// the list, switched off, and the user only flips the switch. Then open the
+/// pane: System Settings (macOS 13+) and System Preferences use different
+/// addresses. v0.8.0 skipped the first step, so the list had no Lumen in it.
 #[tauri::command]
 fn open_fda_settings() -> Res<()> {
-    Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-        .spawn()
-        .map_err(err)?;
+    touch_protected();
+    let pane = if macos_major() >= 13 {
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+    } else {
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+    };
+    let ok = Command::new("open").arg(pane).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        // An address this macOS does not know: at least open Privacy & Security.
+        Command::new("open").arg("x-apple.systempreferences:com.apple.preference.security").spawn().map_err(err)?;
+    }
     Ok(())
+}
+
+/// Read a few files only Full Disk Access may read. Each denied attempt is
+/// what makes macOS add Lumen to the Full Disk Access list.
+fn touch_protected() {
+    let home = PathBuf::from(lumen_home());
+    for p in [
+        home.join("Library/Application Support/com.apple.TCC/TCC.db"),
+        home.join("Library/Safari/Bookmarks.plist"),
+        home.join("Library/Safari/History.db"),
+        home.join("Library/Mail"),
+        home.join("Library/Messages"),
+        PathBuf::from("/Library/Application Support/com.apple.TCC/TCC.db"),
+    ] {
+        let _ = std::fs::File::open(&p);
+        let _ = std::fs::read_dir(&p);
+    }
+}
+
+fn macos_major() -> u32 {
+    Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().split('.').next().and_then(|v| v.parse().ok()))
+        .unwrap_or(13)
+}
+
+/// Lumen.app itself, selected in Finder, for dragging into the Full Disk
+/// Access list when it does not show up there on its own.
+#[tauri::command]
+fn reveal_app() -> Res<()> {
+    Command::new("open").arg("-R").arg(app_bundle().map_err(err)?).spawn().map_err(err)?;
+    Ok(())
+}
+
+fn app_bundle() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    Ok(exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)).unwrap_or(&exe).to_path_buf())
+}
+
+/// Quit, then open Lumen again a second later. Not `app.restart()`: with one
+/// instance enforced, the new process could start while this one still holds
+/// the lock, see "already running" and exit, leaving no Lumen at all.
+fn relaunch_soon(app: &AppHandle) {
+    match app_bundle() {
+        Ok(bundle) if bundle.extension().map(|e| e == "app").unwrap_or(false) => {
+            let spawned = Command::new("/bin/sh")
+                .args(["-c", "sleep 1; /usr/bin/open \"$0\""])
+                .arg(&bundle)
+                .spawn();
+            if spawned.is_ok() {
+                app.exit(0);
+                return;
+            }
+            app.restart();
+        }
+        _ => app.restart(),
+    }
+}
+
+/// Polled by the UI while the user is in System Settings.
+#[tauri::command]
+fn full_disk_access() -> bool {
+    has_full_disk_access()
+}
+
+/// Quit and start again, so a new grant applies to every part of Lumen.
+#[tauri::command]
+fn relaunch(app: AppHandle) {
+    relaunch_soon(&app);
 }
 
 /// Every Finder action first checks the file is still there; a file that
@@ -747,6 +831,14 @@ fn quick_look(state: State<AppState>, path: String) -> Res<()> {
         .spawn()
         .map_err(err)?;
     Ok(())
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
 }
 
 fn toggle_main(app: &AppHandle) {
@@ -810,6 +902,21 @@ fn sys_locale_is_zh() -> bool {
 
 fn main() {
     tauri::Builder::default()
+        // One Lumen at a time: a second launch (say, a copy still on the
+        // DMG next to the one in Applications) shows the running one's window
+        // instead of opening the same index from two processes.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // ~/Library/Logs/app.lumen.desktop/Lumen.log, for when something goes
+        // wrong on a Mac we cannot see.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout))
+                .level(log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: Some("Lumen".into()) }))
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
@@ -824,6 +931,12 @@ fn main() {
                 .build(),
         )
         .setup(move |app| {
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                log::error!("panic: {info}");
+                default_hook(info);
+            }));
+            log::info!("Lumen {} starting", app.package_info().version);
             let data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data)?;
             let config_path = data.join("config.json");
@@ -832,7 +945,23 @@ fn main() {
             use_semantic(config.semantic);
             pace::set_pause_on_battery(config.pause_on_battery);
             // A damaged index is set aside and rebuilt rather than failing to launch.
-            let (index, rebuilt) = Index::open_or_reset(data.join("index.db"))?;
+            // A Lumen that is still quitting may hold the file for a moment.
+            let mut tries = 0;
+            let (index, rebuilt) = loop {
+                match Index::open_or_reset(data.join("index.db")) {
+                    Ok(v) => break v,
+                    Err(e) if tries < 3 => {
+                        log::warn!("index not ready ({e:#}); retrying");
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    Err(e) => {
+                        log::error!("cannot open the index: {e:#}");
+                        return Err(e.into());
+                    }
+                }
+            };
+            log::info!("index open (rebuilt: {rebuilt})");
             let index = Arc::new(index);
             let had_index = rebuilt || index.status().map(|s| s.generation > 0).unwrap_or(false);
 
@@ -848,6 +977,25 @@ fn main() {
                 embedding: Arc::new(AtomicBool::new(false)),
                 rebuilt: AtomicBool::new(rebuilt),
             });
+
+            // The full integrity check, off the launch path. A damaged index
+            // is reported to the UI, which offers Rebuild.
+            {
+                let handle = app.handle().clone();
+                let index = app.state::<AppState>().index.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                    pace::background_thread();
+                    match index.check_integrity() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            log::warn!("index failed its integrity check");
+                            let _ = handle.emit("index://damaged", ());
+                        }
+                        Err(e) => log::info!("integrity check skipped: {e:#}"),
+                    }
+                });
+            }
 
             // Tell the UI when background reading starts or stops holding
             // (power cable, Low Power Mode, Pause).
@@ -945,6 +1093,9 @@ fn main() {
             set_hotkey,
             trash_paths,
             open_fda_settings,
+            reveal_app,
+            full_disk_access,
+            relaunch,
             quick_resize,
             collections,
             collection,
@@ -965,8 +1116,11 @@ fn main() {
         .run(|_app, _event| {
             // Clicking the Dock icon brings the hidden window back.
             #[cfg(target_os = "macos")]
+            // Clicking the Dock icon (or opening Lumen again from Finder)
+            // always brings the window up. It used to toggle, and since the
+            // click focuses the app first, a window already open was hidden.
             if let tauri::RunEvent::Reopen { .. } = _event {
-                toggle_main(_app);
+                show_main(_app);
             }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &_event {

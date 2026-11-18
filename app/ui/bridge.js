@@ -27,6 +27,9 @@ function realBridge() {
     suggestions: () => invoke('suggestions'),
     recentlyOpened: limit => invoke('recently_opened', { limit }),
     rebuildIndex: () => invoke('rebuild_index'),
+    revealApp: () => invoke('reveal_app'),
+    fullDiskAccess: () => invoke('full_disk_access'),
+    relaunch: () => invoke('relaunch'),
     open: path => invoke('open_path', { path }),
     reveal: path => invoke('reveal', { path }),
     quickLook: path => invoke('quick_look', { path }),
@@ -117,6 +120,7 @@ function mockBridge() {
   }
   let scanned = !location.hash.includes('first')
   let paused = location.hash.includes('paused')
+  let fdaChecks = 0
   const listeners = {}
   const COLS = [['invoices', /发票|invoice|收据/i], ['contracts', /合同|协议|contract/i], ['ids', /证件|护照|passport|身份证/i], ['screenshots', /^(Screenshot|截屏)/], ['resumes', /简历|resume/i]]
   const opts = { excluded_names: ['node_modules', '.git', 'Caches', '*.log'], pause_on_battery: true, content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto', semantic: true }
@@ -259,6 +263,9 @@ function mockBridge() {
     suggestions: async () => [{ query: 'nzzj', name: '2024年终总结.key' }, { query: 'ldht', name: '劳动合同.pdf' }],
     recentlyOpened: async n => files.slice(0, n || 20),
     rebuildIndex: async () => {},
+    revealApp: async () => {},
+    fullDiskAccess: async () => (fdaChecks = (fdaChecks || 0) + 1) > 3,
+    relaunch: async () => location.reload(),
     open: async () => {}, reveal: async () => {}, quickLook: async () => {},
     pickFolder: async () => `${HOME}/Projects`,
     on: async (e, cb) => { (listeners[e] ||= []).push(cb) },
