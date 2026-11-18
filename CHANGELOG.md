@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.0 — unreleased
+## v0.8.0 — 2026-11-18
 
 Polish: first launch, background work, errors with a fix, ranking, custom skips, and a 300 000-file load test.
 
@@ -11,7 +11,7 @@ Polish: first launch, background work, errors with a fix, ranking, custom skips,
 - **Custom skips**: Settings → "Skip by folder name or type" — folder names skipped anywhere, and `*.ext` patterns for file types (`excluded_names`).
 - **Faster on big indexes** (300 000 synthetic files, Linux aarch64 sandbox, slower than Apple silicon): searches with words now scan once instead of three times (page, total and chip counts from one pass, ranked in memory): `合同` 719 → 70 ms, `年终总结` 121 → 52 ms, `nzzj` 125 → 56 ms, `合同 >10mb after:2024` 1 343 → 63 ms. Words with 汉字 skip the pinyin column. Insights, Timeline and collections are cached until the index changes and warmed after each scan. `cargo test -p lumen-core --release --test scale -- --ignored`.
 
-## v0.7.0 — unreleased
+## v0.7.0 — 2026-11-18
 
 - **Raycast extension** (`integrations/raycast`): Search Files and Search Files by Meaning, backed by `lumen --json`. Open, reveal, Quick Look, copy path, open with; iCloud / offline / relevance accessories.
 - **Alfred workflow** (`integrations/alfred`, attached to each release as `Lumen.alfredworkflow`): `lf` and `la` keywords via the new `lumen --alfred search|ask` Script Filter output. ⌘↵ reveals.
