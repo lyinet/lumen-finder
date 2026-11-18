@@ -2260,6 +2260,7 @@ dependencies = [
  "dirs 5.0.1",
  "encoding_rs",
  "ignore",
+ "libc",
  "log",
  "notify",
  "pdf-extract",
