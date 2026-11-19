@@ -1,14 +1,17 @@
 //! Search: free text (names, pinyin, folders) plus inline filters.
 //!
 //! Query language, all optional and combinable:
-//!   合同 2024            words, in any order, all must match (pinyin works: "hetong", "ht")
-//!   kind:video  类型:视频  only one kind (also: doc, music, pdf, photo, ebook, zip…)
-//!   ext:pdf               one extension
-//!   in:Downloads          folder path contains
-//!   >100mb  <2gb          size bounds (kb, mb, gb)
-//!   after:2024-03 before:2025   modified date bounds (YYYY, YYYY-MM, YYYY-MM-DD)
-//!   "exact phrase"        quoted text kept together
-//!   name:合同             match the name only, never the words inside files
+//!
+//! ```text
+//! 合同 2024            words, in any order, all must match (pinyin works: "hetong", "ht")
+//! kind:video  类型:视频  only one kind (also: doc, music, pdf, photo, ebook, zip…)
+//! ext:pdf               one extension
+//! in:Downloads          folder path contains (in:"Application Support" for spaces)
+//! >100mb  <2gb          size bounds (kb, mb, gb)
+//! after:2024-03 before:2025   modified date bounds (YYYY, YYYY-MM, YYYY-MM-DD)
+//! "exact phrase"        quoted text kept together
+//! name:合同             match the name only, never the words inside files
+//! ```
 //!
 //! Every word matches a file's name, pinyin or folder, or, for documents Lumen
 //! has read, the text inside it.
@@ -70,7 +73,10 @@ pub(crate) struct Parsed {
 
 pub(crate) fn parse(q: &str) -> Parsed {
     let mut p = Parsed::default();
-    for tok in tokenize(q) {
+    // Names and text are stored precomposed: a query pasted in decomposed
+    // form (copied from a file name) must match them too.
+    let q = crate::nfc(q);
+    for tok in tokenize(&q) {
         let (quoted, tok) = match tok {
             Tok::Quoted(s) => (true, s),
             Tok::Word(s) => (false, s),
@@ -147,11 +153,19 @@ fn tokenize(q: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_quote = false;
+    let mut keyed = false;
     for c in q.chars() {
         match c {
             '"' | '“' | '”' => {
                 if in_quote {
-                    out.push(Tok::Quoted(std::mem::take(&mut cur)));
+                    let t = std::mem::take(&mut cur);
+                    out.push(if keyed { Tok::Word(t) } else { Tok::Quoted(t) });
+                    keyed = false;
+                } else if cur.ends_with([':', '：']) {
+                    // in:"Application Support", name:"q3 report": the quoted
+                    // text is the filter's value, spaces and all. Before, the
+                    // key was left as a bare word ("in:") that matched nothing.
+                    keyed = true;
                 } else if !cur.is_empty() {
                     out.push(Tok::Word(std::mem::take(&mut cur)));
                 }
@@ -166,7 +180,7 @@ fn tokenize(q: &str) -> Vec<Tok> {
         }
     }
     if !cur.is_empty() {
-        out.push(if in_quote { Tok::Quoted(cur) } else { Tok::Word(cur) });
+        out.push(if in_quote && !keyed { Tok::Quoted(cur) } else { Tok::Word(cur) });
     }
     out
 }
@@ -239,7 +253,8 @@ fn like_escape(s: &str) -> String {
 }
 
 fn fts_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    // FTS5 reads a NUL as the end of the query: "a\0b" was a syntax error.
+    format!("\"{}\"", s.replace('\0', "").replace('"', "\"\""))
 }
 
 struct Where {
@@ -389,21 +404,24 @@ fn ranked(
     // opened from Lumen in the last 30 days come first (most opened, then
     // most recent), then the newest.
     let all: Vec<String> = p.terms.iter().chain(p.name_terms.iter()).cloned().collect();
-    let first = all[0].replace(['%', '_'], "");
+    // `%` and `_` in the word are literal: escaped, not deleted (deleting
+    // them made "report_final" rank as "reportfinal", which no name matches).
+    let contains = like_escape(&all[0]);
+    let starts = format!("{}%", &contains[1..contains.len() - 1]);
     let tier = if matches!(sort, Sort::Relevance) {
         args.push(Value::Text(all.join(" ")));
-        args.push(Value::Text(format!("{first}%")));
-        args.push(Value::Text(format!("%{first}%")));
-        args.push(Value::Text(format!("%{first}%")));
-        args.push(Value::Text(format!("%{first}%")));
+        args.push(Value::Text(starts));
+        args.push(Value::Text(contains.clone()));
+        args.push(Value::Text(contains.clone()));
+        args.push(Value::Text(contains));
         args.push(Value::Integer(crate::index::now() - 30 * 86_400));
         // A name or folder hit always outranks a match inside the text.
         "CASE
             WHEN lower(substr(f.name, 1, length(f.name) - length(f.ext) - 1)) = lower(?) THEN 0
-            WHEN f.name LIKE ? THEN 1
-            WHEN f.name LIKE ? THEN 2
-            WHEN f.name_py LIKE ? THEN 3
-            WHEN f.parent LIKE ? THEN 4
+            WHEN f.name LIKE ? ESCAPE '\\' THEN 1
+            WHEN f.name LIKE ? ESCAPE '\\' THEN 2
+            WHEN f.name_py LIKE ? ESCAPE '\\' THEN 3
+            WHEN f.parent LIKE ? ESCAPE '\\' THEN 4
             ELSE 5 END,
          CASE WHEN o.last >= ? THEN o.count ELSE 0 END, coalesce(o.last, 0)"
     } else {
@@ -447,7 +465,8 @@ fn ranked(
         }
     }
     let total = rows.len() as i64;
-    let end = (offset + limit).min(rows.len());
+    // offset comes from the app's JSON: usize::MAX must not overflow.
+    let end = offset.saturating_add(limit).min(rows.len());
     if offset < end {
         let cmp = |a: &Row, b: &Row| match sort {
             Sort::Relevance => a
@@ -485,6 +504,8 @@ fn browse(conn: &rusqlite::Connection, p: &Parsed, kinds: &[Kind], sort: Sort, l
         Sort::Largest => "f.size DESC",
         Sort::Name => "f.name COLLATE NOCASE ASC",
     };
+    // SQLite's LIMIT/OFFSET are i64: a larger usize would not parse.
+    let (limit, offset) = (limit.min(i64::MAX as usize), offset.min(i64::MAX as usize));
     let sql = format!(
         "SELECT {} FROM files f WHERE {where_sql} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
         FileRecord::COLS
@@ -528,15 +549,16 @@ fn records_by_id(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRec
 /// For hits whose name does not show why they matched, an excerpt of the
 /// text around the first matching word.
 fn add_snippets(conn: &rusqlite::Connection, hits: &mut [FileRecord], terms: &[String]) -> Result<()> {
-    let mut stmt = conn.prepare_cached("SELECT body FROM content WHERE id = ?1")?;
+    let mut stmt = conn.prepare_cached("SELECT body, ocr FROM content WHERE id = ?1")?;
     for h in hits.iter_mut() {
         let name = h.name.to_lowercase();
         if terms.iter().all(|t| name.contains(&t.to_lowercase())) {
             continue;
         }
-        let body: Option<String> = stmt.query_row([h.id], |r| r.get(0)).ok();
-        if let Some(body) = body {
+        let row: Option<(String, bool)> = stmt.query_row([h.id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+        if let Some((body, ocr)) = row {
             h.snippet = crate::content::snippet(&body, terms, 28);
+            h.ocr = ocr && h.snippet.is_some();
         }
     }
     Ok(())

@@ -17,10 +17,10 @@ const shortPath = p => !home || !p.startsWith(home) ? p
 
 function row(f, terms, i) {
   const sub = f.snippet
-    ? `<span class="qs"><b>${f.kind === 'image' ? T.in_image : T.in_text}</b>${highlight(f.snippet, terms)}</span>`
+    ? `<span class="qs"><b>${f.kind === 'image' || f.ocr ? T.in_image : T.in_text}</b>${highlight(f.snippet, terms)}</span>`
     : `<span>${esc(shortPath(f.parent))}</span>`
   return `<div class="qr ${i === sel ? 'on' : ''} ${f.offline ? 'off' : ''}" data-i="${i}">
-    <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
+    <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc((f.ext || '').slice(0, 4))}</em></div>
     <div class="qt"><div class="qn">${highlight(f.name, terms)}</div><div class="qsub">${sub}</div></div>
     <div class="qm">${f.offline ? ICON.drive : f.cloud ? `${ICON.cloud}${ago(f.mtime)}` : `${bytes(f.size)} · ${ago(f.mtime)}`}</div></div>`
 }
@@ -71,7 +71,7 @@ function showAll() { api.showInMain(q.value.trim()); }
 q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 40) })
 addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.preventDefault(); q.value ? (q.value = '', run()) : hide() }
-  else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); sel = Math.min(hits.length - 1, sel + 1); draw() }
+  else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); sel = Math.max(0, Math.min(hits.length - 1, sel + 1)); draw() }
   else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); sel = Math.max(0, sel - 1); draw() }
   else if (e.key === 'Enter') { e.preventDefault(); openSel(e.metaKey) }
   else if ((e.metaKey && e.key.toLowerCase() === 'o') || e.key === 'Tab') { e.preventDefault(); if (q.value.trim()) showAll() }

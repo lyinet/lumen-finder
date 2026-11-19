@@ -211,11 +211,30 @@ pub fn icloud_drive() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// Never fails: a missing or unreadable file means defaults, and a file
+    /// with one bad value (a null, a wrong type from an older or hand-edited
+    /// config) keeps every other setting. Before, one bad field threw the whole
+    /// file away, roots and exclusions included.
     pub fn load(path: &Path) -> Config {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Ok(text) = std::fs::read_to_string(path) else { return Config::default() };
+        let text = text.trim_start_matches('\u{feff}');
+        if let Ok(c) = serde_json::from_str::<Config>(text) {
+            return c;
+        }
+        let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Config::default();
+        };
+        let mut good = serde_json::Map::new();
+        for (key, value) in fields {
+            let mut one = serde_json::Map::new();
+            one.insert(key.clone(), value.clone());
+            if serde_json::from_value::<Config>(serde_json::Value::Object(one)).is_ok() {
+                good.insert(key, value);
+            } else {
+                log::warn!("config: ignoring bad value for {key:?}");
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(good)).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -356,15 +375,29 @@ impl PathFilter {
 }
 
 /// Drop roots already covered by another, unless something between them is
-/// skipped (then the outer walk never reaches the inner root).
+/// skipped (then the outer walk never reaches the inner root). Compared by
+/// where they really are: a root that is a link into another root (or to the
+/// same folder) had every file under it indexed twice, and a root under a
+/// link inside another root (which the walk does not follow) was dropped and
+/// never indexed at all. Of two roots for the same folder, the one that is
+/// not a link stays.
 fn dedup_roots(sorted: Vec<PathBuf>, blocked: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for r in sorted {
-        let covered = out.iter().any(|o| r.starts_with(o) && !blocked.iter().any(|p| r.starts_with(p) && p.starts_with(o) && p != o));
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let blocked: Vec<PathBuf> = blocked.iter().map(|p| real(p)).collect();
+    let mut by_real: Vec<(PathBuf, PathBuf)> = sorted.into_iter().map(|r| (real(&r), r)).collect();
+    // Outer before inner; for one folder, its own path before a link to it.
+    by_real.sort_by(|(ca, a), (cb, b)| ca.cmp(cb).then((a != ca).cmp(&(b != cb))).then(a.cmp(b)));
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (c, r) in by_real {
+        let covered = out
+            .iter()
+            .any(|(o, _)| c.starts_with(o) && !blocked.iter().any(|p| c.starts_with(p) && p.starts_with(o) && p != o));
         if !covered {
-            out.push(r);
+            out.push((c, r));
         }
     }
+    let mut out: Vec<PathBuf> = out.into_iter().map(|(_, r)| r).collect();
+    out.sort();
     out
 }
 

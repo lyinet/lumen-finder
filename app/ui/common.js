@@ -19,11 +19,20 @@ export function ago(ts) {
   return new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 export function highlight(name, terms) {
-  let out = esc(name)
+  // Matched on the plain name, escaped piece by piece: matching the escaped
+  // text marked inside entities ("amp" in &amp;) and inside the <mark> tags
+  // an earlier word had added ("mark").
+  name = String(name)
   const words = terms.filter(t => !t.includes(':') && !/^[<>]/.test(t)).map(t => t.replace(/"/g, '')).filter(Boolean)
+  const on = new Array(name.length).fill(false)
   for (const w of words) {
     const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-    out = out.replace(re, m => `<mark>${m}</mark>`)
+    for (const m of name.matchAll(re)) for (let i = m.index; i < m.index + m[0].length; i++) on[i] = true
+  }
+  let out = '', i = 0
+  while (i < name.length) {
+    let j = i; while (j < name.length && on[j] === on[i]) j++
+    out += on[i] ? `<mark>${esc(name.slice(i, j))}</mark>` : esc(name.slice(i, j)); i = j
   }
   return out
 }

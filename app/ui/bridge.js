@@ -9,6 +9,12 @@ export const isApp = !!tauri
 function realBridge() {
   const { invoke } = tauri.core
   const { listen } = tauri.event
+  // Listen as this window: a bare `listen` targets Any, and Tauri hands an
+  // Any listener every event, `emit_to` another window's label included, so
+  // the panel and the main window both ran each other's app://query.
+  const label = tauri.webviewWindow?.getCurrentWebviewWindow?.()?.label
+    ?? window.__TAURI_INTERNALS__?.metadata?.currentWebview?.label
+  const opts = label ? { target: label } : undefined
   return {
     snapshot: () => invoke('snapshot'),
     search: req => invoke('search', { req }),
@@ -49,7 +55,7 @@ function realBridge() {
     showInMain: query => invoke('show_in_main', { query }),
     takeLink: () => invoke('take_link'),
     pickFolder: async () => tauri.dialog ? tauri.dialog.open({ directory: true, multiple: false }) : null,
-    on: (event, cb) => listen(event, e => cb(e.payload)),
+    on: (event, cb) => listen(event, e => cb(e.payload), opts),
   }
 }
 
@@ -96,10 +102,12 @@ function mockBridge() {
     ['document', '读书笔记 - 置身事内', 'docx', 'Documents/学习/研究生', '地方政府的土地财政与招商引资，决定了过去二十年的城市化速度。'],
     ['pdf', 'Quarterly report Q3', 'pdf', 'Downloads', 'Quarterly revenue grew 42% year over year, led by subscriptions in Japan and Korea.'],
     ['spreadsheet', '家庭预算2025', 'xlsx', 'Documents/个人', '房贷 8200 · 物业 460 · 孩子兴趣班 1800 · 旅行基金 3000 · 合同保险 920'],
+    // A scanned PDF: its words came from OCR, so the row says "in image".
+    ['pdf', 'Scan_20250312', 'pdf', 'Documents/扫描', '房屋租赁合同 出租方 承租方 押金两个月 租期自2025年3月起', true],
   ]
-  for (const [kind, base, ext, folder, text] of TEXTS) {
+  for (const [kind, base, ext, folder, text, ocr] of TEXTS) {
     const parent = `${HOME}/${folder}`
-    files.push({ id: files.length + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind, size: 380000, mtime: now - 86400 * (3 + files.length % 40), text })
+    files.push({ id: files.length + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind, size: 380000, mtime: now - 86400 * (3 + files.length % 40), text, ...(ocr ? { ocr: true } : {}) })
   }
   for (const [name, kind, ext] of [['北海道旅行 原片', 'video', 'mov'], ['相册备份 2019', 'archive', 'zip'], ['合同扫描 归档', 'pdf', 'pdf']]) {
     const parent = '/Volumes/Passport/归档'
@@ -118,7 +126,7 @@ function mockBridge() {
     const parent = `${HOME}/${folder}`
     files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: kind === 'video' ? 1.8e9 : kind === 'image' ? 5.2e6 : 2.1e5, mtime: now - 86400 * days })
   }
-  let scanned = !location.hash.includes('first')
+  let scanned = !location.hash.includes('first'), scanning = false
   let paused = location.hash.includes('paused')
   let fdaChecks = 0
   const listeners = {}
@@ -151,7 +159,8 @@ function mockBridge() {
       const i = f.text.toLowerCase().indexOf(t), a = Math.max(0, i - 18)
       return (a ? '…' : '') + f.text.slice(a, i + t.length + 36) + (i + t.length + 36 < f.text.length ? '…' : '')
     }
-    const page = hits.slice(off, off + (req.limit || 60)).map(f => ({ ...f, offline: !!f.offline, cloud: !!f.cloud, snippet: snip(f), text: undefined }))
+    // Like the core: `ocr` only rides along with a snippet it describes.
+    const page = hits.slice(off, off + (req.limit || 60)).map(f => { const snippet = snip(f); return { ...f, offline: !!f.offline, cloud: !!f.cloud, snippet, ocr: !!(snippet && f.ocr) || undefined, text: undefined } })
     return { hits: page, total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
   }
 
@@ -173,7 +182,7 @@ function mockBridge() {
       if (!n) continue
       let s = v.reduce((a, x, i) => a + x * qv[i], 0) / (n * qn)
       for (const [w, re] of Object.entries(DATES)) if (req.query.includes(w) && re.test(f.name)) s += .08
-      if (s > .58 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, score: Math.min(.97, s * .93) })
+      if (s > .58 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, ocr: undefined, score: Math.min(.97, s * .93) })
     }
     hits.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
     return { hits: hits.slice(0, req.limit || 40), indexed: files.length, took_us: Math.round((performance.now() - t0) * 1000) + 9000 }
@@ -184,7 +193,7 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
+      scanning, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
       semanticReady: true, semanticFiles: files.length,
       // #battery / #paused preview the background-work states (v0.8).
       hold: paused ? 'user' : location.hash.includes('battery') ? 'battery' : null,
@@ -214,13 +223,15 @@ function mockBridge() {
       return groups.sort((a, b) => b.wasted - a.wasted)
     },
     startScan: async () => {
+      if (scanning) return
+      scanning = true
       const t0 = Date.now(), total = 128402, D = 6500
       const dirs = FOLDERS.map(f => `${HOME}/${f}`)
       const tick = setInterval(() => {
         const p = Math.min(1, (Date.now() - t0) / D), e = 1 - Math.pow(1 - p, 2.2)
         emit('scan://progress', { phase: p < 1 ? 'walking' : 'finishing', files_found: Math.floor(total * e), dirs: Math.floor(9812 * e), bytes_found: Math.floor(1.9e12 * e), elapsed_ms: Date.now() - t0, current: pick(dirs) + '/' + pick(NAMES.document) })
         if (p >= 1) {
-          clearInterval(tick); scanned = true
+          clearInterval(tick); scanned = true; scanning = false
           setTimeout(() => emit('scan://done', { generation: 1, full: true, cancelled: false, files: total, bytes: 1.9e12, added: total, changed: 0, removed: 0, dirs: 9812, elapsed_ms: D }), 400)
           let d = 0; const T2 = 6120
           const rt = setInterval(() => { d = Math.min(T2, d + 410); emit('content://progress', { done: d, total: T2, current: '', finished: d >= T2 })
@@ -236,17 +247,17 @@ function mockBridge() {
       return opts
     },
     collections: async () => COLS.map(([id, re]) => { const m = files.filter(f => re.test(f.name)); return { id, files: m.length, bytes: m.reduce((a, f) => a + f.size, 0), latest: Math.max(0, ...m.map(f => f.mtime)) } }),
-    collection: async id => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime) },
+    collection: async (id, limit) => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime).slice(0, limit || 200) },
     timeline: async () => {
       const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
       const by = {}
       files.forEach(f => { const m = by[ym(f.mtime)] ||= { month: ym(f.mtime), files: 0, bytes: 0, k: {} }; m.files += 37; m.bytes += f.size * 37; m.k[f.kind] = (m.k[f.kind] || 0) + 37 })
       return Object.values(by).sort((a, b) => b.month.localeCompare(a.month))
-        .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([kind, files]) => ({ kind, files })) }))
+        .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).map(([kind, files]) => ({ kind, files })) }))
     },
-    month: async (month, kind) => {
+    month: async (month, kind, limit) => {
       const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
-      return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
+      return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime).slice(0, limit || 300)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
     checkUpdate: async () => location.hash.includes('update') ? { version: '0.8.0', current: '0.6.1', notes: '' } : null,
@@ -256,8 +267,8 @@ function mockBridge() {
     takeLink: async () => { const m = location.hash.match(/^#link=(search|ask):(.*)$/); return m ? { mode: m[1], query: decodeURIComponent(m[2]) } : null },
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},
-    setRoots: async roots => ({ roots }),
-    setExcluded: async p => ({ excluded_paths: p }),
+    setRoots: async roots => ({ ...opts, roots }),
+    setExcluded: async p => ({ ...opts, excluded_paths: p }),
     setExcludedNames: async names => { opts.excluded_names = names; return opts },
     setPaused: async on => { paused = on; return on ? 'user' : null },
     suggestions: async () => [{ query: 'nzzj', name: '2024年终总结.key' }, { query: 'ldht', name: '劳动合同.pdf' }],

@@ -77,7 +77,7 @@ impl Kind {
         let e = ext.to_ascii_lowercase();
         Some(match e.as_str() {
             "doc" | "docx" | "odt" | "rtf" | "txt" | "md" | "markdown" | "pages" | "tex" | "wps"
-            | "org" | "rst" => Kind::Document,
+            | "org" | "rst" | "html" | "htm" | "xhtml" => Kind::Document,
             "xls" | "xlsx" | "xlsm" | "csv" | "tsv" | "numbers" | "ods" | "et" => Kind::Spreadsheet,
             "ppt" | "pptx" | "key" | "odp" | "dps" => Kind::Presentation,
             "pdf" => Kind::Pdf,
@@ -111,5 +111,10 @@ mod tests {
         assert_eq!(Kind::parse("音乐"), Some(Kind::Audio));
         assert_eq!(Kind::from_ext("MP4"), Some(Kind::Video));
         assert_eq!(Kind::from_ext("dylib"), None);
+        // Saved web pages: the README promises their words are searchable.
+        for e in ["html", "HTM", "xhtml"] {
+            assert_eq!(Kind::from_ext(e), Some(Kind::Document), "{e}");
+            assert!(crate::content::EXTS.contains(&e.to_ascii_lowercase().as_str()), "{e}");
+        }
     }
 }

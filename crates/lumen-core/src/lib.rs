@@ -38,6 +38,19 @@ pub use watcher::{ChangeBatch, Watcher};
 /// Pinyin search key for a file name: full syllables then initials, so
 /// "年终总结.key" is found by "nianzhong" and by "nzzj". Empty for names
 /// without Chinese characters (nothing to add over the name itself).
+/// Text in its precomposed Unicode form (NFC), as people type it. macOS
+/// spells some names decomposed (NFD: "e" + accent, Hangul as letters), and
+/// a typed query never matched those. Names, folders, document text and
+/// queries all go through this; paths keep the disk's own spelling.
+pub fn nfc(s: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
+    if s.is_ascii() || is_nfc_quick(s.chars()) == IsNormalized::Yes {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(s.nfc().collect())
+    }
+}
+
 pub fn pinyin_key(name: &str) -> String {
     use pinyin::ToPinyin;
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);

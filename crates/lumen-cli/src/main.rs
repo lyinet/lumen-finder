@@ -20,12 +20,41 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+const USAGE: &str = "lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]";
+
 fn main() -> Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Not `env::args()`: it panics on an argument that is not UTF-8 (a pasted
+    // byte, a name from another system). macOS file names are UTF-8.
+    let mut args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let alfred = take_flag(&mut args, "--alfred");
     let json = take_flag(&mut args, "--json") && !alfred;
-    let db = take_opt(&mut args, "--db").map(PathBuf::from).unwrap_or_else(default_db);
+    let r = run(args, json, alfred);
+    match r {
+        // Alfred shows a Script Filter's output, never its errors: a failure
+        // (no semantic helper, an unreadable index) left an empty list.
+        Err(e) if alfred => {
+            let item = serde_json::json!({ "title": "Lumen could not search", "subtitle": format!("{e:#}"), "valid": false });
+            println!("{}", serde_json::json!({ "items": [item] }));
+            Ok(())
+        }
+        r => r,
+    }
+}
+
+fn run(mut args: Vec<String>, json: bool, alfred: bool) -> Result<()> {
+    let db = take_opt(&mut args, "--db")?.map(PathBuf::from).unwrap_or_else(default_db);
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
+    if !matches!(cmd.as_str(), "scan" | "content" | "search" | "s" | "ask" | "stats" | "dupes") {
+        // Help needs no index (and must not create an empty one).
+        if matches!(cmd.as_str(), "help" | "--help" | "-h") {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        // A mistyped command is an error: it used to print the usage and
+        // exit 0, so a script never noticed nothing ran.
+        eprintln!("lumen: unknown command “{cmd}”\n{USAGE}");
+        std::process::exit(2);
+    }
     let index = Index::open(&db)?;
     set_embed_helper(Some(helper_path()));
 
@@ -33,7 +62,18 @@ fn main() -> Result<()> {
         "scan" => {
             let mut cfg = Config::load(&config_path());
             if !args.is_empty() {
-                cfg.roots = args.iter().map(PathBuf::from).collect();
+                // Full paths, and only folders that exist: "." stored rows
+                // like "./notes.txt" the app could not open, and a mistyped
+                // folder scanned nothing and then removed every file of the
+                // index (it shares the app's) as gone.
+                cfg.roots = args
+                    .iter()
+                    .map(|a| {
+                        let p = full_path(a)?;
+                        anyhow::ensure!(p.is_dir(), "no such folder: {a}");
+                        Ok(p)
+                    })
+                    .collect::<Result<_>>()?;
             }
             let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |p| {
                 if !json {
@@ -41,7 +81,15 @@ fn main() -> Result<()> {
                 }
             })?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&r)?);
+                // One JSON document: the scan report, with the reading pass
+                // under "content" when there was one. Two documents in a row
+                // were not parseable as JSON.
+                let mut out = serde_json::to_value(&r)?;
+                if cfg.content_search && !r.cancelled {
+                    out["content"] = serde_json::to_value(read_content(&index, true)?)?;
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
             } else {
                 eprintln!();
                 println!(
@@ -59,7 +107,12 @@ fn main() -> Result<()> {
                 read_content(&index, json)?;
             }
         }
-        "content" => read_content(&index, json)?,
+        "content" => {
+            let r = read_content(&index, json)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
         "search" | "s" => {
             let r = index.search(&SearchRequest { query: args.join(" "), limit: 30, ..Default::default() })?;
             if alfred {
@@ -85,12 +138,15 @@ fn main() -> Result<()> {
         }
         "ask" => {
             anyhow::ensure!(lumen_core::semantic::available(), "semantic search needs Lumen.app (set LUMEN_HELPER to lumen-ocr)");
-            let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
+            let mut shown = false;
+            index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
                 if !json && !alfred && !p.finished && p.total > 0 {
                     eprint!("\r\x1b[2K  learning {}/{} files", p.done, p.total);
+                    shown = true;
                 }
             })?;
-            if !json && !alfred && r.embedded > 0 {
+            // End the progress line even when nothing could be embedded.
+            if shown {
                 eprintln!();
             }
             let r = semantic_search(&index, &SemanticRequest { query: args.join(" "), limit: 20, ..Default::default() })?;
@@ -130,26 +186,23 @@ fn main() -> Result<()> {
                 }
             }
         }
-        _ => {
-            println!("lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]");
-        }
+        _ => println!("{USAGE}"),
     }
     Ok(())
 }
 
-fn read_content(index: &Index, json: bool) -> Result<()> {
+/// Read documents; prints the summary line unless `json` (the caller prints).
+fn read_content(index: &Index, json: bool) -> Result<ContentReport> {
     let r = index_content(index, Arc::new(AtomicBool::new(false)), |p| {
         if !json && !p.finished {
             eprint!("\r\x1b[2K  reading {}/{} documents", p.done, p.total);
         }
     })?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&r)?);
-    } else {
+    if !json {
         eprintln!();
         println!("Read {} documents ({} with text, {} unreadable) in {:.2}s", r.read, r.with_text, r.failed, r.elapsed_ms as f64 / 1000.0);
     }
-    Ok(())
+    Ok(r)
 }
 
 /// Alfred Script Filter: one item per file, ↵ opens it, ⌘↵ reveals it
@@ -157,7 +210,7 @@ fn read_content(index: &Index, json: bool) -> Result<()> {
 fn print_alfred<'a>(hits: impl Iterator<Item = (&'a FileRecord, Option<&'a str>)>) -> Result<()> {
     let items: Vec<serde_json::Value> = hits
         .map(|(f, snippet)| {
-            let place = f.parent.replace(&std::env::var("HOME").unwrap_or_default(), "~");
+            let place = tilde(&f.parent, &std::env::var("HOME").unwrap_or_default());
             let mut sub = match snippet {
                 Some(s) => format!("{s} · {place}"),
                 None => place,
@@ -192,10 +245,44 @@ fn take_flag(args: &mut Vec<String>, f: &str) -> bool {
     n != args.len()
 }
 
-fn take_opt(args: &mut Vec<String>, f: &str) -> Option<String> {
-    let i = args.iter().position(|a| a == f)?;
+/// `--db PATH`. A flag with no value is an error: before, `lumen search x --db`
+/// quietly used the app's own index instead of the one asked for.
+fn take_opt(args: &mut Vec<String>, f: &str) -> Result<Option<String>> {
+    let Some(i) = args.iter().position(|a| a == f) else { return Ok(None) };
     args.remove(i);
-    (i < args.len()).then(|| args.remove(i))
+    anyhow::ensure!(i < args.len(), "{f} needs a value");
+    Ok(Some(args.remove(i)))
+}
+
+/// "/Users/a/Documents" → "~/Documents". Only a whole leading home folder:
+/// a plain `replace` turned "/Users/ab" into "~b", and with HOME unset or
+/// empty put a "~" between every character.
+fn tilde(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// An absolute path with "." and ".." worked out, as the app stores paths
+/// ("Docs/../Docs" was stored as written: a second copy of every file).
+fn full_path(a: &str) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in std::path::absolute(a)?.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    Ok(out)
 }
 
 fn data_dir() -> PathBuf {
@@ -231,4 +318,37 @@ fn human(b: i64) -> String {
         i += 1;
     }
     if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", units[i]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_becomes_tilde_only_as_a_prefix() {
+        assert_eq!(tilde("/Users/a/Documents", "/Users/a"), "~/Documents");
+        assert_eq!(tilde("/Users/a", "/Users/a/"), "~");
+        assert_eq!(tilde("/Users/ab/x", "/Users/a"), "/Users/ab/x");
+        assert_eq!(tilde("/Volumes/Users/a/x", "/Users/a"), "/Volumes/Users/a/x");
+        assert_eq!(tilde("/Users/a/x", ""), "/Users/a/x");
+    }
+
+    #[test]
+    fn roots_are_full_and_tidy() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(full_path(".").unwrap(), cwd);
+        assert_eq!(full_path("a/../b/./c/").unwrap(), cwd.join("b/c"));
+        assert_eq!(full_path("/x/../y").unwrap(), PathBuf::from("/y"));
+    }
+
+    #[test]
+    fn db_flag_needs_a_value() {
+        let mut a: Vec<String> = vec!["search".into(), "x".into(), "--db".into()];
+        assert!(take_opt(&mut a, "--db").is_err());
+        let mut a: Vec<String> = vec!["--db".into(), "/tmp/i.db".into(), "stats".into()];
+        assert_eq!(take_opt(&mut a, "--db").unwrap().as_deref(), Some("/tmp/i.db"));
+        assert_eq!(a, vec!["stats".to_string()]);
+        let mut a: Vec<String> = vec!["stats".into()];
+        assert_eq!(take_opt(&mut a, "--db").unwrap(), None);
+    }
 }

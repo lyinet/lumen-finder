@@ -127,38 +127,81 @@ impl Embedder for HelperEmbedder {
     }
 
     fn embed(&self, items: &[(Model, String)]) -> Result<Vec<Option<Vec<f32>>>> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::process::{Command, Stdio};
-        let mut cmd = Command::new(&self.bin);
-        cmd.arg("embed").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        crate::pace::background_command(&mut cmd);
-        let mut child = cmd.spawn()?;
-        let mut input = String::new();
-        for (m, t) in items {
-            let clean: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-            input.push_str(m.tag());
-            input.push('\t');
-            input.push_str(clean.trim());
-            input.push('\n');
-        }
-        let mut stdin = child.stdin.take().unwrap();
-        // Write on a thread so a full stdout pipe can never deadlock us.
-        let writer = std::thread::spawn(move || {
-            let _ = stdin.write_all(input.as_bytes());
-        });
-        let mut out = Vec::with_capacity(items.len());
-        for line in BufReader::new(child.stdout.take().unwrap()).lines() {
-            let line = line?;
-            out.push(parse_vec(&line));
-            if out.len() == items.len() {
+        embed_with_helper(&self.bin, items, EMBED_TIMEOUT)
+    }
+}
+
+/// One batch through the helper may take this long. A helper that hangs
+/// (a language model download that never finishes) used to stall semantic
+/// indexing for good: nothing could cancel it.
+const EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn embed_with_helper(bin: &std::path::Path, items: &[(Model, String)], timeout: std::time::Duration) -> Result<Vec<Option<Vec<f32>>>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(bin);
+    cmd.arg("embed").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::pace::background_command(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let mut input = String::new();
+    for (m, t) in items {
+        // One sentence per line: no line or paragraph separators inside it.
+        let clean: String =
+            t.chars().map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c }).collect();
+        input.push_str(m.tag());
+        input.push('\t');
+        input.push_str(clean.trim());
+        input.push('\n');
+    }
+    let mut stdin = child.stdin.take().unwrap();
+    // Write on a thread so a full stdout pipe can never deadlock us.
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(input.as_bytes());
+    });
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        // Bytes, not `lines()`: one non-UTF-8 byte failed the whole batch.
+        for line in BufReader::new(stdout).split(b'\n') {
+            let Ok(line) = line else { break };
+            if tx.send(parse_vec(&String::from_utf8_lossy(&line))).is_err() {
                 break;
             }
         }
-        let _ = writer.join();
-        let _ = child.wait();
-        anyhow::ensure!(out.len() == items.len(), "embed helper answered {} of {}", out.len(), items.len());
-        Ok(out)
+    });
+    let deadline = Instant::now() + timeout;
+    let mut out = Vec::with_capacity(items.len());
+    while out.len() < items.len() {
+        match rx.recv_deadline(deadline) {
+            Ok(v) => out.push(v),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("embed helper timed out after {} of {}", out.len(), items.len());
+            }
+        }
     }
+    // Every answer is in (or the helper closed its output): give it until
+    // the deadline to exit. A helper that answered and then hung used to
+    // block indexing here for good.
+    if out.len() < items.len() {
+        let _ = child.kill();
+    } else {
+        loop {
+            match child.try_wait() {
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    let _ = child.wait();
+    anyhow::ensure!(out.len() == items.len(), "embed helper answered {} of {}", out.len(), items.len());
+    Ok(out)
 }
 
 fn parse_vec(line: &str) -> Option<Vec<f32>> {
@@ -166,12 +209,15 @@ fn parse_vec(line: &str) -> Option<Vec<f32>> {
     if line.is_empty() {
         return None;
     }
-    let v: Vec<f32> = line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    // All or nothing: skipping one bad number shifted every dimension after it.
+    let v: Vec<f32> = line.split(',').map(|x| x.trim().parse().ok().filter(|f: &f32| f.is_finite())).collect::<Option<_>>()?;
     (v.len() >= 8).then_some(v)
 }
 
 // ------------------------------------------------------------ vectors ----
 
+// `!(n > 1e-9)` on purpose: it is also true for NaN, which `n <= 1e-9` is not.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn normalize(v: &mut [f32]) -> bool {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if !(n > 1e-9) {
@@ -325,7 +371,14 @@ pub fn index_semantic(
             let mut put = tx.prepare_cached(
                 "INSERT OR REPLACE INTO vectors(id, mtime, size, model, vec) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
+            // Embedding a batch takes a while: the file may have left the
+            // index meanwhile, and its id may now be another file's (ids
+            // restart after a reset; the highest is reused after a delete).
+            let mut same = tx.prepare_cached("SELECT 1 FROM files WHERE id = ?1 AND name = ?2 AND parent = ?3")?;
             for ((job, (model, _)), v) in chunk.iter().zip(&items).zip(vecs) {
+                if !same.exists(params![job.0, job.3, job.4])? {
+                    continue;
+                }
                 // A file with no vector still gets a row (empty blob) so it is
                 // not retried on every pass.
                 let blob = match v.and_then(|mut v| normalize(&mut v).then_some(v)) {
@@ -388,7 +441,10 @@ pub struct SemanticResponse {
 }
 
 struct Cache {
-    key: (PathBuf, i64),
+    /// Index file, vector revision and how many vectors there are: deleting a
+    /// file deletes its vector by trigger without a new revision, and a file
+    /// added after it can get the same row id.
+    key: (PathBuf, i64, i64),
     rows: Vec<(i64, Model, Vec<u8>)>,
 }
 
@@ -419,7 +475,7 @@ pub fn semantic_search(index: &Index, req: &SemanticRequest) -> Result<SemanticR
     let own = Model::for_text(query);
 
     let rev = get_meta_i64(&index.conn(), "vec_rev")?.unwrap_or(0);
-    let key = (index.path().to_path_buf(), rev);
+    let key = (index.path().to_path_buf(), rev, indexed);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if cache.as_ref().map(|c| c.key != key).unwrap_or(true) {
         let conn = index.conn();
@@ -491,6 +547,48 @@ mod tests {
         let exact: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
         let approx = dequant_dot(&quantize(&a), &b);
         assert!((exact - approx).abs() < 0.01, "{exact} vs {approx}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_helper_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("helper");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let t = Instant::now();
+        let r = embed_with_helper(&bin, &[(Model::En, "a".into())], std::time::Duration::from_millis(300));
+        assert!(r.is_err());
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_answers_are_read_leniently_but_vectors_strictly() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("helper");
+        // a good vector, a non-UTF-8 line, a vector with a bad number, an empty line
+        std::fs::write(&bin, "#!/bin/sh\ncat >/dev/null\nprintf '1,0,0,0,0,0,0,0\\n\\377\\n1,x,0,0,0,0,0,0,0\\n\\n'\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let items: Vec<(Model, String)> = (0..4).map(|i| (Model::En, format!("s{i}"))).collect();
+        let v = embed_with_helper(&bin, &items, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(v.iter().map(|x| x.is_some()).collect::<Vec<_>>(), vec![true, false, false, false]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_answers_then_hangs_is_not_waited_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("helper");
+        std::fs::write(&bin, "#!/bin/sh\ncat >/dev/null\nprintf '1,0,0,0,0,0,0,0\\n'\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let t = Instant::now();
+        let r = embed_with_helper(&bin, &[(Model::En, "a".into())], std::time::Duration::from_millis(500));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(r.unwrap().len(), 1);
     }
 
     #[test]

@@ -81,7 +81,7 @@ function go(view) {
 // ------------------------------------------------------------ views ------
 const VIEWS = { timeline: viewTimeline, collections: viewCollections, search: viewSearch, recent: () => viewList('recent'), large: () => viewList('large'), forgotten: () => viewList('forgotten'), insights: viewInsights, dupes: viewDupes, settings: viewSettings }
 function render() {
-  const v = $('#view'); v.innerHTML = ''; v.classList.remove('view-enter', 'semantic'); void v.offsetWidth; v.classList.add('view-enter')
+  const v = $('#view'); v.dataset.r = Number(v.dataset.r || 0) + 1; v.innerHTML = ''; v.classList.remove('view-enter', 'semantic'); void v.offsetWidth; v.classList.add('view-enter')
   VIEWS[state.view](v)
 }
 
@@ -92,7 +92,7 @@ function rowHTML(f, terms = [], i = 0, extra = '') {
     ? `<div class="snip"><b>${f.kind === 'image' || (f.kind === 'pdf' && f.ocr) ? T.in_image : T.in_text}</b><span>${highlight(f.snippet, terms)}</span></div>`
     : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
   return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
-    <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc(f.ext).slice(0, 4)}</em></div>
+    <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc((f.ext || '').slice(0, 4))}</em></div>
     <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${f.cloud ? `<span class="badge cloud" title="${esc(T.cloud_tip)}">${ICON.cloud}${esc(T.cloud)}</span>` : ''}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
     <div class="size">${f.cloud && !f.size ? '—' : bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
 }
@@ -277,8 +277,10 @@ async function viewCollection(v, id) {
   v.append(head)
   const sc = h('<div class="scroll"><div class="list" id="list"></div></div>'); v.append(sc)
   bindRows(sc)
-  const items = await api.collection(id, 300)
-  $('#col-count').textContent = T.files(fmt(items.length))
+  const [items, stats] = await Promise.all([api.collection(id, 300), api.collections().catch(() => [])])
+  // The list is the newest 300; the count is the whole collection (it said "300 files").
+  const total = stats.find(s => s.id === id)?.files ?? 0
+  $('#col-count', head).textContent = T.files(fmt(Math.max(total, items.length)))
   $('#list', sc).innerHTML = items.map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">${T.col_none}</div>`
 }
 
@@ -295,10 +297,10 @@ async function viewTimeline(v) {
   for (const m of months) {
     const y = m.month.slice(0, 4)
     if (y !== year) { year = y; tl.append(h(`<div class="tl-year"><span>${T.tl_year(y)}</span><b>${T.files(fmt(months.filter(x => x.month.startsWith(y)).reduce((a, x) => a + x.files, 0)))}</b></div>`)) }
-    const total = m.kinds.reduce((a, k) => a + k.files, 0) || 1
+    const top = m.kinds.slice(0, 4), total = top.reduce((a, k) => a + k.files, 0) || 1
     const r = h(`<button class="tl-row" style="animation-delay:${Math.min(i++, 20) * 22}ms"><i class="dot"></i>
       <div class="tl-m">${T.tl_month(m.month)}</div>
-      <div class="tl-bar"><div class="tl-fill" data-w="${(Math.max(m.files / max, 0.02) * 100).toFixed(1)}">${m.kinds.map(k => `<b style="--c:${kc(k.kind)};flex:${k.files / total}"></b>`).join('')}</div></div>
+      <div class="tl-bar"><div class="tl-fill" data-w="${(Math.max(m.files / max, 0.02) * 100).toFixed(1)}">${top.map(k => `<b style="--c:${kc(k.kind)};flex:${k.files / total}"></b>`).join('')}</div></div>
       <div class="tl-kinds">${m.kinds.slice(0, 3).map(k => `<span style="--c:${kc(k.kind)}"><i></i>${T.kind[k.kind]} ${fmt(k.files)}</span>`).join('')}</div>
       <div class="tl-n">${fmt(m.files)}</div><div class="tl-s">${bytes(m.bytes)}</div></button>`)
     r.onclick = () => { state.month = m.month; state.monthKind = null; render() }
@@ -314,14 +316,29 @@ async function viewMonth(v, month) {
   const chips = h('<div class="chips tl-chips"></div>'); v.append(chips)
   const sc = h('<div class="scroll"><div class="list" id="list"></div></div>'); v.append(sc)
   bindRows(sc)
-  const all = await api.month(month, null, 1000)
+  const LIMIT = 1000
+  const r = v.dataset.r
+  const [all, months] = await Promise.all([api.month(month, null, LIMIT), api.timeline().catch(() => [])])
+  // Only the newest 1000 files are loaded: a bigger month used to say "1,000
+  // files", count kinds among those only, and filter a kind out of them.
+  const stat = months.find(m => m.month === month)
+  const full = all.length < LIMIT
   const counts = {}; all.forEach(f => counts[f.kind] = (counts[f.kind] || 0) + 1)
-  const draw = () => {
-    const items = state.monthKind ? all.filter(f => f.kind === state.monthKind) : all
-    $('#col-count').textContent = T.files(fmt(items.length))
+  if (!full && stat) stat.kinds.forEach(k => counts[k.kind] = Math.max(counts[k.kind] || 0, k.files))
+  const total = full ? all.length : Math.max(stat?.files ?? 0, all.length)
+  const byKind = {}
+  const draw = async () => {
+    const k = state.monthKind
+    let items = k ? all.filter(f => f.kind === k) : all
+    if (k && !full) {
+      byKind[k] ||= await api.month(month, k, LIMIT)
+      if (v.dataset.r !== r || state.monthKind !== k) return
+      items = byKind[k]
+    }
+    $('#col-count', head).textContent = T.files(fmt(k ? Math.max(counts[k] || 0, items.length) : total))
     $('#list', sc).innerHTML = items.slice(0, 400).map((f, i) => rowHTML(f, [], i)).join('') || `<div class="empty" style="padding:40px">—</div>`
-    chips.innerHTML = [`<button class="chip ${state.monthKind ? '' : 'on'}" data-k="">${T.all} <b>${fmt(all.length)}</b></button>`,
-      ...KINDS.filter(k => counts[k]).map(k => `<button class="chip ${state.monthKind === k ? 'on' : ''}" data-k="${k}" style="--c:${kc(k)}"><i></i>${T.kind[k]} <b>${fmt(counts[k])}</b></button>`)].join('')
+    chips.innerHTML = [`<button class="chip ${k ? '' : 'on'}" data-k="">${T.all} <b>${fmt(total)}</b></button>`,
+      ...KINDS.filter(x => counts[x]).map(x => `<button class="chip ${k === x ? 'on' : ''}" data-k="${x}" style="--c:${kc(x)}"><i></i>${T.kind[x]} <b>${fmt(counts[x])}</b></button>`)].join('')
     chips.querySelectorAll('button').forEach(b => b.onclick = () => { state.monthKind = b.dataset.k || null; draw() })
   }
   draw()
@@ -419,7 +436,7 @@ async function viewInsights(v) {
     r.ondblclick = () => act('reveal', f.path)
     list.append(r)
   })
-  tween($('#ins-n'), totalFiles, { dur: 1300 })
+  tween($('#ins-n', hero), totalFiles, { dur: 1300 })
   requestAnimationFrame(() => requestAnimationFrame(() => sc.querySelectorAll('[data-w]').forEach(b => b.style.width = b.dataset.w + '%')))
 }
 
@@ -428,8 +445,9 @@ async function viewDupes(v) {
   v.append(h(`<div class="head"><div><h1>${T.dupes_title}</h1><p>${T.dupes_sub}</p></div><div class="s" id="dupe-total"></div></div>`))
   const sc = h(`<div class="scroll"><div class="empty" style="padding:60px"><div><div class="orb"></div><div class="big">${T.dupes_loading}</div></div></div></div>`); v.append(sc)
   bindRows(sc)
-  const groups = await api.duplicates()
-  if (state.view !== 'dupes') return
+  const r = v.dataset.r, groups = await api.duplicates()
+  // Left (or left and came back) while it loaded: the page on screen is not this one.
+  if (state.view !== 'dupes' || v.dataset.r !== r) return
   if (!groups.length) { sc.innerHTML = `<div class="empty" style="padding:60px"><div><div class="big">${T.dupes_none}</div></div></div>`; return }
   let wasted = groups.reduce((a, g) => a + g.wasted, 0)
   const keep = groups.map(() => 0)
@@ -492,7 +510,8 @@ async function trash(paths) {
 
 // ---- settings
 async function viewSettings(v) {
-  const snap = await api.snapshot(); state.snapshot = snap
+  const r = v.dataset.r, snap = await api.snapshot(); state.snapshot = snap
+  if (v.dataset.r !== r) return // 等快照时已切到别的页面：不要把设置画进去
   v.append(h(`<div class="head"><div><h1>${T.settings_title}</h1><p>${T.settings_sub}</p></div></div>`))
   const sc = h('<div class="scroll"><div class="form"></div></div>'); v.append(sc)
   const form = $('.form', sc)
@@ -525,7 +544,7 @@ async function viewSettings(v) {
   form.insertBefore(gen, form.querySelector('.field:not(.fda)'))
   gen.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions(sw.dataset.k === 'quick' ? { quickPanel: on } : { launchAtLogin: on })
+    const cfg = await setOption(sw, on, sw.dataset.k === 'quick' ? { quickPanel: on } : { launchAtLogin: on }); if (!cfg) return
     state.snapshot.config = { ...state.snapshot.config, ...cfg }
   })
   gen.querySelectorAll('#theme button').forEach(b => b.onclick = async () => {
@@ -535,7 +554,7 @@ async function viewSettings(v) {
   })
   feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions({ content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, icloud: { includeIcloud: on }, external: { includeExternal: on } }[sw.dataset.k])
+    const cfg = await setOption(sw, on, { content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, icloud: { includeIcloud: on }, external: { includeExternal: on } }[sw.dataset.k]); if (!cfg) return
     state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
   })
   const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>
@@ -549,7 +568,8 @@ async function viewSettings(v) {
   form.append(upd)
   $('.switch', upd).onclick = async e => {
     const sw = e.currentTarget, on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions({ autoUpdate: on }); state.snapshot.config = { ...state.snapshot.config, ...cfg }
+    const cfg = await setOption(sw, on, { autoUpdate: on }); if (!cfg) return
+    state.snapshot.config = { ...state.snapshot.config, ...cfg }
   }
   $('#upd-check', upd).onclick = async () => {
     try { const u = await api.checkUpdate(); u ? updateBanner(u) : toast(T.upd_none) } catch { toast(T.upd_fail) }
@@ -572,7 +592,8 @@ function bgField(snap) {
   $('#bg-pause', f).onclick = async () => { state.hold = await api.setPaused(state.hold !== 'user'); drawBg(); setLive(state.snapshot) }
   $('.switch', f).onclick = async e => {
     const sw = e.currentTarget, on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await api.setOptions({ pauseOnBattery: on }); state.snapshot.config = { ...state.snapshot.config, ...cfg }
+    const cfg = await setOption(sw, on, { pauseOnBattery: on }); if (!cfg) return
+    state.snapshot.config = { ...state.snapshot.config, ...cfg }
   }
   setTimeout(drawBg)
   return f
@@ -605,6 +626,10 @@ function skipField(items) {
   draw(); return f
 }
 
+/** Save one switch; when the app refuses (launch at login can fail), the switch goes back. */
+async function setOption(sw, on, opts) {
+  try { return await api.setOptions(opts) } catch { sw.classList.toggle('on', !on); return null }
+}
 function toggleRow(k, title, p, on) {
   return `<div class="toggle"><div><b>${title}</b><p>${p}</p></div><button class="switch ${on ? 'on' : ''}" data-k="${k}"><i></i></button></div>`
 }
@@ -647,8 +672,11 @@ const KEYNAMES = { Alt: '⌥', Option: '⌥', Cmd: '⌘', Command: '⌘', CmdOrC
 const keycaps = acc => acc.split('+').map(k => `<kbd>${KEYNAMES[k] || k.replace(/^Key/, '')}</kbd>`).join('')
 function recordHotkey(btn) {
   btn.onclick = () => {
+    if (btn.classList.contains('rec')) return
     btn.classList.add('rec'); btn.innerHTML = `<span>${T.set_hotkey_rec}</span>`
     const onKey = async e => {
+      // Left Settings while recording: stop listening, let the key through.
+      if (!btn.isConnected) return removeEventListener('keydown', onKey, true)
       e.preventDefault(); e.stopPropagation()
       if (e.key === 'Escape') return done(state.snapshot.config.hotkey)
       if (['Meta', 'Alt', 'Control', 'Shift'].includes(e.key)) return
@@ -665,6 +693,7 @@ function recordHotkey(btn) {
 }
 
 // ------------------------------------------------------------ updates ----
+let updListening = false
 function updateBanner(u) {
   if ($('.upd-banner')) return
   const b = h(`<div class="upd-banner"><div class="upd-icon">${ICON.spark}</div><div class="upd-txt"><b>${T.upd_avail(esc(u.version))}</b><span></span></div>
@@ -672,7 +701,8 @@ function updateBanner(u) {
   $('[data-a="later"]', b).onclick = () => { b.classList.add('out'); setTimeout(() => b.remove(), 200) }
   $('[data-a="go"]', b).onclick = async e => {
     e.currentTarget.disabled = true; $('[data-a="later"]', b).remove()
-    api.on('update-progress', p => { $('.upd-txt span', b).textContent = T.upd_progress(Math.round(p * 100)) })
+    // One listener for the app's life: a retry used to add another each time.
+    if (!updListening) { updListening = true; api.on('update-progress', p => { const s = $('.upd-banner .upd-txt span'); if (s) s.textContent = T.upd_progress(Math.round(p * 100)) }) }
     try { await api.installUpdate() } catch { b.remove(); toast(T.upd_fail, { label: T.retry, run: () => updateBanner(u) }) }
   }
   document.body.append(b)
@@ -722,7 +752,7 @@ addEventListener('keydown', e => {
   if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (state.view !== 'search') go('search'); else $('#q')?.select(); return }
   if (state.view !== 'search') return
   const q = $('#q'), f = selected()
-  if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); state.sel = Math.min(state.hits.length - 1, state.sel + 1); moveSel(); if (state.sel > state.hits.length - 10 && state.more) loadMore() }
+  if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); state.sel = Math.max(0, Math.min(state.hits.length - 1, state.sel + 1)); moveSel(); if (state.sel > state.hits.length - 10 && state.more) loadMore() }
   else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); state.sel = Math.max(0, state.sel - 1); moveSel() }
   else if (e.key === 'Enter' && f) { e.preventDefault(); act(e.metaKey ? 'reveal' : 'open', f.path) }
   else if (e.key === ' ' && f && (document.activeElement !== q || !q.value || e.shiftKey || q.selectionStart === 0)) {
@@ -745,8 +775,15 @@ function setLive(snap) {
     : state.reading ? T.live_reading(fmt(state.reading.done), fmt(state.reading.total))
     : snap?.status?.last_scan_at ? `${T.live_watching} · ${ago(snap.status.last_scan_at)}` : T.live_watching
 }
-async function refreshSnapshot() { const s = await api.snapshot(); state.snapshot = s; state.home = s.home; state.scanning = s.scanning; state.hold = s.hold || null; if (!s.reading) state.reading = null; setLive(s); return s }
-function scanStarted() { state.scanning = true; setLive(state.snapshot) }
+async function refreshSnapshot() {
+  const done = state.scansEnded
+  const s = await api.snapshot(); state.snapshot = s; state.home = s.home
+  // A scan that ended while this was on its way is over, whatever it says.
+  state.scanning = s.scanning && done === state.scansEnded; state.hold = s.hold || null; if (!s.reading) state.reading = null; setLive(s); return s }
+// Whether a scan really started is the app's call: turning meaning search off
+// starts none, and a small scan can finish before the command returns. Both
+// left the spinner on until the next scan.
+async function scanStarted() { state.scanning = true; setLive(state.snapshot); await refreshSnapshot().catch(() => {}) }
 
 // ------------------------------------------------------------ stage ------
 function showStage(el) {
@@ -783,7 +820,9 @@ function scanningStage() {
   radar = new Radar($('canvas', el))
 }
 function onProgress(p) {
-  state.scanning = true
+  // A scan the UI did not start (a drive, a queued rescan), or one a stale
+  // snapshot said had ended: progress was counted but the spinner stayed off.
+  if (!state.scanning) { state.scanning = true; setLive(state.snapshot) }
   if ($('#stage').hidden) { $('#live-sub').textContent = `${T.live_scanning} ${fmt(p.files_found)}`; return }
   const n = $('#sc-n'); if (!n) return
   n.textContent = fmt(p.files_found)
@@ -794,7 +833,7 @@ function onProgress(p) {
   radar?.feed(p.files_found)
 }
 async function onDone(r) {
-  state.scanning = false
+  state.scanning = false; state.scansEnded = (state.scansEnded || 0) + 1
   const snap = await refreshSnapshot()
   if ($('#stage').hidden || !$('#sc-n')) {
     if (r.full && !r.cancelled) toast(T.done_toast(fmt(snap.status.files)))
@@ -870,7 +909,7 @@ async function boot() {
   $('#rescan').onclick = () => api.startScan().then(scanStarted)
   await api.on('scan://progress', onProgress)
   await api.on('scan://done', onDone)
-  await api.on('scan://error', () => { state.scanning = false; setLive(state.snapshot); toast(T.scan_err, { label: T.retry, run: () => api.startScan().then(scanStarted) }) })
+  await api.on('scan://error', () => { state.scanning = false; state.scansEnded = (state.scansEnded || 0) + 1; setLive(state.snapshot); toast(T.scan_err, { label: T.retry, run: () => api.startScan().then(scanStarted) }) })
   await api.on('index://damaged', () => toast(T.index_damaged, { label: T.rebuild, run: async () => { await api.rebuildIndex(); toast(T.rebuild_started); scanStarted() } }))
   await api.on('pace://hold', hld => { state.hold = hld || null; setLive(state.snapshot); drawBg() })
   await api.on('index://changed', async b => { toast(T.toast_changed(b.upserted, b.removed)); await refreshSnapshot(); if (state.view === 'search') runSearch(true) })

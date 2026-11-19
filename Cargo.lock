@@ -572,6 +572,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "unicode-normalization",
  "zip",
 ]
 

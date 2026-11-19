@@ -109,8 +109,8 @@ impl Index {
     pub fn collection(&self, id: &str, limit: usize, offset: usize) -> Result<Vec<FileRecord>> {
         let Some(r) = rule(id) else { return Ok(Vec::new()) };
         let (w, mut args) = r.filter();
-        args.push(Value::Integer(limit as i64));
-        args.push(Value::Integer(offset as i64));
+        args.push(Value::Integer(crate::index::sql_int(limit)));
+        args.push(Value::Integer(crate::index::sql_int(offset)));
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM files f WHERE {w} ORDER BY f.mtime DESC LIMIT ? OFFSET ?",

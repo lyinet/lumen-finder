@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS content (
     id    INTEGER PRIMARY KEY,
     mtime INTEGER NOT NULL,
     size  INTEGER NOT NULL,
-    body  TEXT NOT NULL DEFAULT ''
+    body  TEXT NOT NULL DEFAULT '',
+    ocr   INTEGER NOT NULL DEFAULT 0
 );
 -- v3: the index holds the text split by cjk::index_text (CJK runs as
 -- overlapping two-character pieces), written from Rust; the stored body above
@@ -142,6 +143,9 @@ pub struct FileRecord {
     /// rather than the name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// The snippet's text was read by OCR (a scanned PDF, an image).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ocr: bool,
 }
 
 impl FileRecord {
@@ -153,6 +157,7 @@ impl FileRecord {
             id: r.get(0)?,
             offline: crate::config::volume_offline(Path::new(&path)),
             snippet: None,
+            ocr: false,
             path,
             name: r.get(2)?,
             parent: r.get(3)?,
@@ -185,8 +190,9 @@ impl NewFile {
         let file_name = path.file_name()?.to_string_lossy().into_owned();
         let placeholder = crate::config::icloud_placeholder(&file_name).map(str::to_string);
         let cloud = placeholder.is_some() || is_dataless(meta);
-        let name = placeholder.unwrap_or(file_name);
-        let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        // Shown and searched precomposed; `path` keeps the disk's spelling.
+        let name = crate::nfc(&placeholder.unwrap_or(file_name)).into_owned();
+        let parent = path.parent().map(|p| crate::nfc(&p.to_string_lossy()).into_owned()).unwrap_or_default();
         let ext = Path::new(&name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -251,6 +257,11 @@ pub(crate) fn unix(t: std::time::SystemTime) -> i64 {
         Ok(d) => d.as_secs() as i64,
         Err(e) => -(e.duration().as_secs() as i64),
     }
+}
+
+/// A count or offset for SQL: clamped, since `usize as i64` wraps to -1.
+pub(crate) fn sql_int(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 pub(crate) fn now() -> i64 {
@@ -346,11 +357,19 @@ impl Index {
     /// Forget everything; the next scan is a first scan again.
     pub fn reset(&self) -> Result<()> {
         let conn = self.conn();
+        // Row ids restart from 1 after this, so the vector revision must keep
+        // counting up: restarting it too let semantic search reuse a cached
+        // copy of the old vectors under the same (path, revision) key and
+        // answer with whichever new file got an old id.
+        let vec_rev = get_meta_i64(&conn, "vec_rev")?.unwrap_or(0);
         conn.execute_batch(
             "BEGIN;
-             DELETE FROM opens; DELETE FROM vectors; DELETE FROM content; DELETE FROM files; DELETE FROM meta;
-             COMMIT; VACUUM;",
+             DELETE FROM opens; DELETE FROM vectors; DELETE FROM content;
+             DELETE FROM files; DELETE FROM meta;
+             COMMIT;",
         )?;
+        set_meta(&conn, "vec_rev", vec_rev + 1)?;
+        conn.execute_batch("VACUUM;")?;
         drop(conn);
         self.forget_memos();
         Ok(())
@@ -428,7 +447,14 @@ impl Index {
         if version != 0 && version != SCHEMA_VERSION && version != 1 && version != 2 {
             // Future migrations go here. The index is a cache of the disk, so
             // the safe fallback is always "drop and rescan".
-            conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
+            // Everything keyed by a file id goes too: ids restart once `files`
+            // is recreated, and leftover text, vectors or opens would be
+            // attached to whichever new file got the old id.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files;
+                 DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS content_fts; DROP TABLE IF EXISTS content;
+                 DROP TABLE IF EXISTS opens;",
+            )?;
         }
         conn.execute_batch(SCHEMA).context("creating schema")?;
         // v0.7: files.cloud (iCloud files not on this Mac).
@@ -437,6 +463,13 @@ impl Index {
             .exists([])?;
         if !has_cloud {
             conn.execute_batch("ALTER TABLE files ADD COLUMN cloud INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        // v0.8.3: content.ocr (text read by OCR, labelled "in image").
+        let has_ocr: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('content') WHERE name = 'ocr'")?
+            .exists([])?;
+        if !has_ocr {
+            conn.execute_batch("ALTER TABLE content ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0;")?;
         }
         // Only write when something changed: a write waits for any other
         // connection's transaction (a scan still finishing in a Lumen that is
@@ -528,7 +561,13 @@ impl Index {
 
     /// Forget a file Lumen found missing when the user tried to open it.
     pub fn remove_path(&self, path: &str) -> Result<usize> {
-        remove_tree(&self.conn(), path)
+        let n = remove_tree(&self.conn(), path)?;
+        // PRAGMA data_version only moves for other connections' commits, so a
+        // write on this one must drop the summaries itself.
+        if n > 0 {
+            self.forget_memos();
+        }
+        Ok(n)
     }
 
     /// The stored text of a file, if Lumen has read it.

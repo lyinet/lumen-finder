@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — bug fixes
+
+No new features. Ten rounds of test → fix → retest (about 75 fixes, tests 30 → 93). Highlights:
+
+- **Index safety**: no text or vectors landing on the wrong file after a rebuild; deleted, unreadable, ejected and symlinked roots handled correctly; overlapping roots indexed once; permission errors never delete files from the index.
+- **Unicode**: file names, folders, text and queries normalized (NFC), so accented and Korean names are found whichever form macOS reports; existing indexes migrate in the background.
+- **Reading**: HTML is now actually read; RTF accents and GB18030 files read correctly; scanned-PDF matches are labelled “in image”; moved and renamed documents stay searchable without a rescan.
+- **Search**: quoted filter values (`in:"Application Support"`), `_`/`%` literal, FTS syntax in queries can no longer error, highlighting no longer breaks names.
+- **Duplicates**: same-size files are hashed in full before they are called copies.
+- **App**: commands run off the main thread, scans requested mid-scan are queued, watcher stops promptly, drives that come back are rescanned, Dock/tray always show the window, events reach only the window they are for, Settings errors revert switches, collection/month views show real totals.
+- **CLI**: `scan` refuses a missing folder and stores absolute paths, `--json` prints one document, Alfred shows errors, exit codes fixed.
+
 ## v0.8.1 — unreleased
 
 Fixes from the first real-Mac test of 0.8.0.

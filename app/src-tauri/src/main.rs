@@ -33,6 +33,15 @@ struct AppState {
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
     embedding: Arc<AtomicBool>,
+    /// A scan was asked for (new settings, a drive plugged in, a rebuild)
+    /// while one was running: run another when it ends, with the new config.
+    rescan: Arc<AtomicBool>,
+    /// The same for reading: a scan added files while a reading pass (whose
+    /// list was already made) was running.
+    reread: Arc<AtomicBool>,
+    /// rebuild_index is stopping work and wiping the index: nothing may start
+    /// a watcher or a reading pass on the old rows until it has.
+    rebuilding: AtomicBool,
     /// The index file was damaged at launch and has been started over (v0.8).
     rebuilt: AtomicBool,
 }
@@ -66,8 +75,8 @@ struct Snapshot {
     index_rebuilt: bool,
 }
 
-#[tauri::command]
-fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
+#[tauri::command(async)]
+fn snapshot(app: AppHandle, window: tauri::Window, state: State<AppState>) -> Res<Snapshot> {
     let status = state.index.status().map_err(err)?;
     Ok(Snapshot {
         first_run: status.generation == 0,
@@ -81,7 +90,9 @@ fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
         semantic_ready: lumen_core::semantic::available(),
         semantic_files: lumen_core::semantic::semantic_count(&state.index).unwrap_or(0),
         hold: pace::hold(),
-        index_rebuilt: state.rebuilt.swap(false, Ordering::Relaxed),
+        // Only the main window says so (and clears it): the hidden quick panel
+        // also asks for a snapshot at launch and would otherwise swallow it.
+        index_rebuilt: if window.label() == "main" { state.rebuilt.swap(false, Ordering::Relaxed) } else { state.rebuilt.load(Ordering::Relaxed) },
     })
 }
 
@@ -89,7 +100,7 @@ fn lumen_home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn search(state: State<AppState>, req: SearchRequest) -> Res<SearchResponse> {
     state.index.search(&req).map_err(err)
 }
@@ -104,22 +115,22 @@ async fn semantic(state: State<'_, AppState>, req: SemanticRequest) -> Res<Seman
         .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn overview(state: State<AppState>) -> Res<Overview> {
     state.index.overview().map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn recent(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.recent(limit.unwrap_or(40)).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn largest(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.largest(limit.unwrap_or(40)).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn forgotten(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.forgotten(limit.unwrap_or(40)).map_err(err)
 }
@@ -138,15 +149,40 @@ fn start_scan(app: AppHandle, state: State<AppState>) -> Res<()> {
     run_scan(&app, &state)
 }
 
+/// Clears a busy flag when dropped, so a panic or an early return can never
+/// leave Lumen thinking a scan or a reading pass is still running.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A scan that must see the current settings: when one is already running
+/// (with the old roots, exclusions or drives), run another right after it.
+/// Plain `run_scan` joined the running scan and the change was not indexed
+/// until the next launch.
+fn run_scan_fresh(app: &AppHandle, state: &AppState) -> Res<()> {
+    if state.scanning.load(Ordering::SeqCst) {
+        state.rescan.store(true, Ordering::SeqCst);
+    }
+    run_scan(app, state)
+}
+
 fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
     if state.scanning.swap(true, Ordering::SeqCst) {
         return Ok(()); // already running; the UI is subscribed to its events
     }
+    let busy = Busy(state.scanning.clone());
+    // This scan reads the settings as they are now: an earlier request for
+    // a fresh scan is answered by it.
+    state.rescan.store(false, Ordering::SeqCst);
+    let rescan = state.rescan.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     *state.cancel.lock().unwrap() = Some(cancel.clone());
     let index = state.index.clone();
     let cfg = state.config.lock().unwrap().clone();
-    let scanning = state.scanning.clone();
     let app = app.clone();
     std::thread::Builder::new()
         .name("lumen-scan".into())
@@ -156,7 +192,21 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
             let result = scan(&index, &cfg, cancel, |p| {
                 let _ = emitter.emit("scan://progress", p);
             });
-            scanning.store(false, Ordering::SeqCst);
+            drop(busy);
+            // Settings changed (or a drive came) while this scan ran: scan
+            // again with them instead of reading with the old ones.
+            // The UI keeps showing one scan: no "done" for this one, the next
+            // one's progress and result follow.
+            if rescan.swap(false, Ordering::SeqCst) {
+                let state = app.state::<AppState>();
+                // (A rebuild scans by itself once the index is wiped.)
+                if !state.rebuilding.load(Ordering::SeqCst) {
+                    if let Err(e) = run_scan(&app, &state) {
+                        let _ = app.emit("scan://error", e);
+                    }
+                }
+                return;
+            }
             match result {
                 Ok(report) => {
                     let _ = app.emit("scan://done", &report);
@@ -185,12 +235,15 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
                 }
             }
         })
-        .map_err(err)?;
+        .map_err(err)?; // (the closure, and `busy` with it, is dropped on failure)
     Ok(())
 }
 
 #[tauri::command]
 fn cancel_scan(state: State<AppState>) {
+    // Stopped means stopped: no queued scan or reading pass starts after.
+    state.rescan.store(false, Ordering::SeqCst);
+    state.reread.store(false, Ordering::SeqCst);
     if let Some(c) = state.cancel.lock().unwrap().as_ref() {
         c.store(true, Ordering::Relaxed);
     }
@@ -202,13 +255,21 @@ fn cancel_scan(state: State<AppState>) {
 /// Read the words of new and changed documents, after a scan.
 fn run_content(app: &AppHandle) {
     let state = app.state::<AppState>();
-    if state.reading.swap(true, Ordering::SeqCst) {
+    if state.rebuilding.load(Ordering::SeqCst) {
         return;
     }
+    if state.reading.swap(true, Ordering::SeqCst) {
+        // The running pass will not see this scan's new files: read again
+        // after it, rather than at the next launch.
+        state.reread.store(true, Ordering::SeqCst);
+        return;
+    }
+    let busy = Busy(state.reading.clone());
+    state.reread.store(false, Ordering::SeqCst);
+    let reread = state.reread.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     *state.read_cancel.lock().unwrap() = Some(cancel.clone());
     let index = state.index.clone();
-    let reading = state.reading.clone();
     let app = app.clone();
     let _ = std::thread::Builder::new().name("lumen-content".into()).spawn(move || {
         pace::background_thread();
@@ -216,12 +277,16 @@ fn run_content(app: &AppHandle) {
         let r = index_content(&index, cancel.clone(), |p| {
             let _ = emitter.emit("content://progress", p);
         });
-        reading.store(false, Ordering::SeqCst);
+        drop(busy);
         match r {
             Ok(report) => {
                 let _ = app.emit("content://done", &report);
             }
             Err(e) => log::warn!("content indexing failed: {e}"),
+        }
+        if !cancel.load(Ordering::Relaxed) && reread.swap(false, Ordering::SeqCst) {
+            run_content(&app);
+            return;
         }
         // Vectors use the first lines of each file's text, so they come after.
         if !cancel.load(Ordering::Relaxed) {
@@ -236,14 +301,15 @@ fn run_semantic(app: &AppHandle, cancel: Arc<AtomicBool>) {
         return;
     }
     let state = app.state::<AppState>();
-    if state.embedding.swap(true, Ordering::SeqCst) {
+    if state.rebuilding.load(Ordering::SeqCst) || state.embedding.swap(true, Ordering::SeqCst) {
         return;
     }
+    let busy = Busy(state.embedding.clone());
     let emitter = app.clone();
     let r = index_semantic(&state.index, cancel, |p| {
         let _ = emitter.emit("semantic://progress", p);
     });
-    state.embedding.store(false, Ordering::SeqCst);
+    drop(busy);
     match r {
         Ok(report) => {
             let _ = app.emit("semantic://done", &report);
@@ -254,20 +320,32 @@ fn run_semantic(app: &AppHandle, cancel: Arc<AtomicBool>) {
 
 fn restart_watcher(app: &AppHandle) {
     let state = app.state::<AppState>();
+    // A scan that ends while the index is being rebuilt must not bring the
+    // watcher back on rows about to be wiped; the rebuild's scan starts it.
+    if state.rebuilding.load(Ordering::SeqCst) {
+        return;
+    }
     let cfg = state.config.lock().unwrap().clone();
     let emitter = app.clone();
     let mut slot = state.watcher.lock().unwrap();
     *slot = None; // stop the old stream first
     match Watcher::start(&state.index, &cfg, move |batch| {
         let plugged = batch.volumes_changed;
+        let left = batch.content_left;
         let _ = emitter.emit("index://changed", batch);
+        if left && !plugged {
+            // A big folder moved in: the watcher read the first documents,
+            // a paced background pass reads the rest now instead of at the
+            // next scan (often the next launch).
+            run_content(&emitter);
+        }
         if plugged {
             // A drive came or went: pick up its files, or mark them offline.
             let app = emitter.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let state = app.state::<AppState>();
-                let _ = run_scan(&app, &state);
+                let _ = run_scan_fresh(&app, &state);
             });
         }
     }) {
@@ -276,7 +354,7 @@ fn restart_watcher(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_roots(app: AppHandle, state: State<AppState>, roots: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -284,11 +362,11 @@ fn set_roots(app: AppHandle, state: State<AppState>, roots: Vec<String>) -> Res<
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -296,12 +374,12 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
 /// Folder names and "*.ext" patterns to skip (v0.8).
-#[tauri::command]
+#[tauri::command(async)]
 fn set_excluded_names(app: AppHandle, state: State<AppState>, names: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -311,7 +389,7 @@ fn set_excluded_names(app: AppHandle, state: State<AppState>, names: Vec<String>
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
@@ -325,12 +403,12 @@ fn set_paused(app: AppHandle, on: bool) -> Option<Hold> {
 }
 
 /// Searches to try after the first scan, from the user's own files.
-#[tauri::command]
+#[tauri::command(async)]
 fn suggestions(state: State<AppState>) -> Res<Vec<Suggestion>> {
     state.index.suggestions(3).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn recently_opened(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.recently_opened(limit.unwrap_or(20)).map_err(err)
 }
@@ -341,6 +419,7 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
+        state.rebuilding.store(true, Ordering::SeqCst);
         for slot in [&state.cancel, &state.read_cancel] {
             if let Some(c) = slot.lock().unwrap().as_ref() {
                 c.store(true, Ordering::Relaxed);
@@ -354,37 +433,44 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        state.index.reset().map_err(err)?;
-        run_scan(&handle, &state)
+        // A scan that finished just as the cancel landed may have started
+        // the watcher again before it saw `rebuilding`.
+        *state.watcher.lock().unwrap() = None;
+        let reset = state.index.reset().map_err(err);
+        state.rebuilding.store(false, Ordering::SeqCst);
+        reset?;
+        // A scan still running (it did not stop in time) is followed by a
+        // fresh one; before, the rebuild then scanned nothing at all.
+        run_scan_fresh(&handle, &state)
     })
     .await
     .map_err(err)?
 }
 
 /// Smart collections and how many files each holds.
-#[tauri::command]
+#[tauri::command(async)]
 fn collections(state: State<AppState>) -> Res<Vec<CollectionStat>> {
     state.index.collections().map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection(state: State<AppState>, id: String, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.collection(&id, limit.unwrap_or(200), offset.unwrap_or(0)).map_err(err)
 }
 
 /// Months that have files, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 fn timeline(state: State<AppState>) -> Res<Vec<MonthStat>> {
     state.index.timeline(240).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn month(state: State<AppState>, month: String, kind: Option<Kind>, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.month(&month, kind, limit.unwrap_or(300), offset.unwrap_or(0)).map_err(err)
 }
 
 /// Save the share card PNG to the Desktop and show it in Finder.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_share_card(png: Vec<u8>) -> Res<String> {
     if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" || png.len() > 20 << 20 {
         return Err("not a PNG".into());
@@ -393,8 +479,24 @@ fn save_share_card(png: Vec<u8>) -> Res<String> {
     let desk = Path::new(&home).join("Desktop");
     let dir = if desk.is_dir() { desk } else { PathBuf::from(&home) };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path = dir.join(format!("Lumen-{stamp}.png"));
-    std::fs::write(&path, png).map_err(err)?;
+    // Never over an earlier card: two saves in the same second used to
+    // share a name, and the second silently replaced the first.
+    let mut n = 0;
+    let path = loop {
+        let p = dir.join(if n == 0 { format!("Lumen-{stamp}.png") } else { format!("Lumen-{stamp}-{n}.png") });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(&png) {
+                    let _ = std::fs::remove_file(&p);
+                    return Err(err(e));
+                }
+                break p;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(e) => return Err(err(e)),
+        }
+    };
     let _ = Command::new("open").arg("-R").arg(&path).spawn();
     Ok(path.to_string_lossy().into_owned())
 }
@@ -448,7 +550,7 @@ fn use_semantic(on: bool) {
 }
 
 /// Content search and external drives on or off.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_options(
     app: AppHandle,
     state: State<AppState>,
@@ -514,7 +616,7 @@ fn set_options(
     }
     // Only the options that change what is indexed need a scan.
     if content_search.is_some() || include_external.is_some() || include_icloud.is_some() || ocr.is_some() || semantic == Some(true) {
-        run_scan(&app, &state)?;
+        run_scan_fresh(&app, &state)?;
     }
     Ok(cfg)
 }
@@ -593,7 +695,9 @@ fn show_in_main(app: AppHandle, query: String) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
-        let _ = w.emit("app://query", query);
+        // To this window only: `emit` goes to every window, and the panel
+        // (which also listens for app://query) re-ran the query behind it.
+        let _ = w.emit_to("main", "app://query", query);
     }
 }
 
@@ -619,9 +723,9 @@ fn open_link(app: &AppHandle, url: &tauri::Url) {
         if !app.get_webview_window("quick").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false) {
             toggle_quick(app);
         }
-        if let Some(w) = app.get_webview_window("quick") {
-            let _ = w.emit("app://query", query);
-        }
+        // To the panel only: `emit` reaches every window, and the main
+        // window switched to search with the panel's query, losing its view.
+        let _ = app.emit_to("quick", "app://query", query);
         return;
     }
     let link = Link { mode: if host == "ask" { "ask".into() } else { "search".into() }, query };
@@ -668,7 +772,7 @@ struct Trashed {
 
 /// Move files to the Trash (Finder's "Put Back" restores them) and forget
 /// them. Used by the duplicates view.
-#[tauri::command]
+#[tauri::command(async)]
 fn trash_paths(state: State<AppState>, paths: Vec<String>) -> Res<Trashed> {
     let present: Vec<&String> = paths.iter().filter(|p| Path::new(p).exists()).collect();
     let bytes = present.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
@@ -706,7 +810,7 @@ fn has_full_disk_access() -> bool {
 /// the list, switched off, and the user only flips the switch. Then open the
 /// pane: System Settings (macOS 13+) and System Preferences use different
 /// addresses. v0.8.0 skipped the first step, so the list had no Lumen in it.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_fda_settings() -> Res<()> {
     touch_protected();
     let pane = if macos_major() >= 13 {
@@ -782,7 +886,7 @@ fn relaunch_soon(app: &AppHandle) {
 }
 
 /// Polled by the UI while the user is in System Settings.
-#[tauri::command]
+#[tauri::command(async)]
 fn full_disk_access() -> bool {
     has_full_disk_access()
 }
@@ -874,7 +978,8 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
-            "show" => toggle_main(app),
+            // "Open Lumen" always opens: toggling hid a window already in front.
+            "show" => show_main(app),
             "quick" => toggle_quick(app),
             "rescan" => {
                 let state = app.state::<AppState>();
@@ -975,6 +1080,9 @@ fn main() {
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
                 embedding: Arc::new(AtomicBool::new(false)),
+                rescan: Arc::new(AtomicBool::new(false)),
+                reread: Arc::new(AtomicBool::new(false)),
+                rebuilding: AtomicBool::new(false),
                 rebuilt: AtomicBool::new(rebuilt),
             });
 
