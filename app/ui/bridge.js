@@ -118,7 +118,7 @@ function mockBridge() {
     const parent = `${HOME}/${folder}`
     files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: kind === 'video' ? 1.8e9 : kind === 'image' ? 5.2e6 : 2.1e5, mtime: now - 86400 * days })
   }
-  let scanned = !location.hash.includes('first')
+  let scanned = !location.hash.includes('first'), scanning = false
   let paused = location.hash.includes('paused')
   let fdaChecks = 0
   const listeners = {}
@@ -184,7 +184,7 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning: false, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
+      scanning, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
       semanticReady: true, semanticFiles: files.length,
       // #battery / #paused preview the background-work states (v0.8).
       hold: paused ? 'user' : location.hash.includes('battery') ? 'battery' : null,
@@ -214,13 +214,15 @@ function mockBridge() {
       return groups.sort((a, b) => b.wasted - a.wasted)
     },
     startScan: async () => {
+      if (scanning) return
+      scanning = true
       const t0 = Date.now(), total = 128402, D = 6500
       const dirs = FOLDERS.map(f => `${HOME}/${f}`)
       const tick = setInterval(() => {
         const p = Math.min(1, (Date.now() - t0) / D), e = 1 - Math.pow(1 - p, 2.2)
         emit('scan://progress', { phase: p < 1 ? 'walking' : 'finishing', files_found: Math.floor(total * e), dirs: Math.floor(9812 * e), bytes_found: Math.floor(1.9e12 * e), elapsed_ms: Date.now() - t0, current: pick(dirs) + '/' + pick(NAMES.document) })
         if (p >= 1) {
-          clearInterval(tick); scanned = true
+          clearInterval(tick); scanned = true; scanning = false
           setTimeout(() => emit('scan://done', { generation: 1, full: true, cancelled: false, files: total, bytes: 1.9e12, added: total, changed: 0, removed: 0, dirs: 9812, elapsed_ms: D }), 400)
           let d = 0; const T2 = 6120
           const rt = setInterval(() => { d = Math.min(T2, d + 410); emit('content://progress', { done: d, total: T2, current: '', finished: d >= T2 })
@@ -236,7 +238,7 @@ function mockBridge() {
       return opts
     },
     collections: async () => COLS.map(([id, re]) => { const m = files.filter(f => re.test(f.name)); return { id, files: m.length, bytes: m.reduce((a, f) => a + f.size, 0), latest: Math.max(0, ...m.map(f => f.mtime)) } }),
-    collection: async id => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime) },
+    collection: async (id, limit) => { const re = Object.fromEntries(COLS)[id]; return files.filter(f => re.test(f.name)).sort((a, b) => b.mtime - a.mtime).slice(0, limit || 200) },
     timeline: async () => {
       const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
       const by = {}
@@ -244,9 +246,9 @@ function mockBridge() {
       return Object.values(by).sort((a, b) => b.month.localeCompare(a.month))
         .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([kind, files]) => ({ kind, files })) }))
     },
-    month: async (month, kind) => {
+    month: async (month, kind, limit) => {
       const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
-      return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime)
+      return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime).slice(0, limit || 300)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
     checkUpdate: async () => location.hash.includes('update') ? { version: '0.8.0', current: '0.6.1', notes: '' } : null,
@@ -256,8 +258,8 @@ function mockBridge() {
     takeLink: async () => { const m = location.hash.match(/^#link=(search|ask):(.*)$/); return m ? { mode: m[1], query: decodeURIComponent(m[2]) } : null },
     setHotkey: async k => { if (k === 'Cmd+Space') throw 'taken'; opts.hotkey = k; return opts },
     openFdaSettings: async () => {},
-    setRoots: async roots => ({ roots }),
-    setExcluded: async p => ({ excluded_paths: p }),
+    setRoots: async roots => ({ ...opts, roots }),
+    setExcluded: async p => ({ ...opts, excluded_paths: p }),
     setExcludedNames: async names => { opts.excluded_names = names; return opts },
     setPaused: async on => { paused = on; return on ? 'user' : null },
     suggestions: async () => [{ query: 'nzzj', name: '2024年终总结.key' }, { query: 'ldht', name: '劳动合同.pdf' }],

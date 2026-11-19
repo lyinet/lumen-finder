@@ -496,3 +496,37 @@ fn rtf_with_a_chinese_and_a_western_font_reads_both() {
     touch(&p, rtf.as_bytes());
     assert_eq!(content::extract(&p, "rtf").unwrap().as_deref(), Some("Café 合同 crème 合同"));
 }
+
+#[cfg(unix)]
+#[test]
+fn overlapping_roots_index_each_file_once() {
+    // Settings lets a user add ~/Documents and ~/Documents/Work, or a link
+    // that points inside another root: every file under both was indexed
+    // twice (and a live change updated only one of the copies).
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("Documents");
+    let other = dir.path().join("Other");
+    touch(&docs.join("Work/plan.pdf"), b"p");
+    touch(&docs.join("top.pdf"), b"t");
+    touch(&other.join("far.pdf"), b"f");
+    let link_in = dir.path().join("WorkLink"); // → Documents/Work
+    let link_same = dir.path().join("DocsLink"); // → Documents
+    let link_out = docs.join("OtherLink"); // inside Documents, → Other (not walked by it)
+    std::os::unix::fs::symlink(docs.join("Work"), &link_in).unwrap();
+    std::os::unix::fs::symlink(&docs, &link_same).unwrap();
+    std::os::unix::fs::symlink(&other, &link_out).unwrap();
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config {
+        roots: vec![docs.join("Work"), link_in.clone(), docs.clone(), link_same.clone(), link_out.clone(), docs.join("Work/")],
+        ..Config::default()
+    };
+    let roots = cfg.effective_roots();
+    assert!(roots.contains(&link_out), "a link inside a root to elsewhere is still its own root: {roots:?}");
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["far.pdf", "plan.pdf", "top.pdf"]);
+    // An outer root that is a link, with a plain folder inside its target.
+    let cfg = Config { roots: vec![docs.join("Work"), link_same.clone()], ..Config::default() };
+    assert_eq!(cfg.effective_roots(), vec![link_same.clone()]);
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["plan.pdf", "top.pdf"]);
+}

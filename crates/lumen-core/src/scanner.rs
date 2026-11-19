@@ -871,4 +871,31 @@ mod tests {
         std::fs::remove_file(target.join("plan.pdf")).unwrap();
         assert_eq!(apply_paths(&mut conn, &[event], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
     }
+
+    #[test]
+    fn link_into_another_root_updates_its_one_row() {
+        // A root that links inside another root: FSEvents reports the real
+        // path, and the file must have one row to update, not a stale twin.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("Documents");
+        std::fs::create_dir_all(docs.join("Work")).unwrap();
+        let link = dir.path().join("Work");
+        std::os::unix::fs::symlink(docs.join("Work"), &link).unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![docs.clone(), link.clone()], ..Config::default() };
+        std::fs::write(docs.join("Work/plan.pdf"), b"pdf").unwrap();
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        std::fs::write(docs.join("Work/plan.pdf"), b"pdf, longer now").unwrap();
+        let event = std::fs::canonicalize(docs.join("Work")).unwrap().join("plan.pdf");
+        let mut conn = index.writer().unwrap();
+        apply_paths(&mut conn, &[event], &cfg.filter(), &cfg.effective_roots()).unwrap();
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT path, size FROM files")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![(docs.join("Work/plan.pdf").to_string_lossy().into_owned(), 15)]);
+    }
 }
