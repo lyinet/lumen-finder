@@ -185,8 +185,9 @@ impl NewFile {
         let file_name = path.file_name()?.to_string_lossy().into_owned();
         let placeholder = crate::config::icloud_placeholder(&file_name).map(str::to_string);
         let cloud = placeholder.is_some() || is_dataless(meta);
-        let name = placeholder.unwrap_or(file_name);
-        let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        // Shown and searched precomposed; `path` keeps the disk's spelling.
+        let name = crate::nfc(&placeholder.unwrap_or(file_name)).into_owned();
+        let parent = path.parent().map(|p| crate::nfc(&p.to_string_lossy()).into_owned()).unwrap_or_default();
         let ext = Path::new(&name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())

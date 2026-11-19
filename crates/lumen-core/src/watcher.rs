@@ -25,6 +25,9 @@ pub struct ChangeBatch {
     pub content_read: u64,
     /// A drive was plugged in or ejected: the app rescans to pick it up.
     pub volumes_changed: bool,
+    /// More documents arrived than one batch reads (a big folder moved in):
+    /// the app starts a background reading pass for the rest.
+    pub content_left: bool,
 }
 
 pub struct Watcher {
@@ -102,17 +105,17 @@ impl Watcher {
                 let volumes_changed = paths.iter().any(|p| p.parent() == Some(volumes.as_path()));
                 match apply_paths(&mut conn, &paths, &filter, &roots) {
                     Ok((upserted, removed)) if upserted + removed > 0 || volumes_changed => {
-                        let mut content_read = 0;
+                        let (mut content_read, mut content_left) = (0, false);
                         if content && upserted > 0 {
                             // Stopping the watcher stops its reading too: an
                             // image's OCR can take a minute, and restarting
                             // the watcher used to wait for every one of them.
                             match crate::content::index_pending(&mut conn, &stop2, false, |_| {}) {
-                                Ok(r) => content_read = r.read,
+                                Ok(r) => (content_read, content_left) = (r.read, r.left),
                                 Err(e) => log::warn!("content update failed: {e}"),
                             }
                         }
-                        on_change(ChangeBatch { upserted, removed, content_read, volumes_changed })
+                        on_change(ChangeBatch { upserted, removed, content_read, volumes_changed, content_left })
                     }
                     Ok(_) => {}
                     Err(e) => log::warn!("watcher apply failed: {e}"),

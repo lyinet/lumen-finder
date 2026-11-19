@@ -2,7 +2,7 @@
 //! a phrase finds the file that contains it, not only the file named after it.
 //!
 //! Extraction is local and pure Rust:
-//!   plain text      txt md markdown org rst tex csv tsv rtf html
+//!   plain text      txt md markdown org rst tex csv tsv rtf html htm xhtml
 //!   Office Open XML docx pptx xlsx (and OpenDocument odt odp ods)
 //!   EPUB            the book's XHTML chapters
 //!   PDF             the text layer (scanned PDFs need OCR, a later version)
@@ -29,7 +29,7 @@ pub const MAX_TEXT_CHARS: usize = 120_000;
 
 /// Extensions Lumen can read the words of.
 pub const EXTS: &[&str] = &[
-    "txt", "md", "markdown", "org", "rst", "tex", "csv", "tsv", "rtf", "html", "htm", "docx",
+    "txt", "md", "markdown", "org", "rst", "tex", "csv", "tsv", "rtf", "html", "htm", "xhtml", "docx",
     "pptx", "xlsx", "odt", "odp", "ods", "epub", "pdf",
 ];
 
@@ -111,6 +111,9 @@ pub struct ContentReport {
     pub failed: u64,
     pub elapsed_ms: u64,
     pub cancelled: bool,
+    /// Documents this (watcher) pass left for a background pass: more were
+    /// waiting than one live batch reads.
+    pub left: bool,
 }
 
 /// Read every document whose text is missing or out of date.
@@ -172,10 +175,10 @@ pub(crate) fn index_pending(
         conn.execute_batch(crate::scanner::TOUCHED)?;
         (
             format!("AND (f.mtime >= {} OR f.id IN (SELECT id FROM temp.lumen_touched))", crate::index::now() - 3600),
-            format!("LIMIT {WATCHER_MAX_JOBS}"),
+            format!("LIMIT {}", WATCHER_MAX_JOBS + 1),
         )
     };
-    let jobs: Vec<Job> = {
+    let mut jobs: Vec<Job> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT f.id, f.path, f.ext, f.size, f.mtime FROM files f
              LEFT JOIN content c ON c.id = f.id
@@ -189,13 +192,18 @@ pub(crate) fn index_pending(
         })?;
         rows.filter_map(|r| r.ok()).collect()
     };
+    // Over the cap: the rest is a background pass's, which the watcher
+    // asks for (`left`). It used to wait for the next scan, often the next
+    // launch, out of content search until then.
+    let left = !paced && jobs.len() > WATCHER_MAX_JOBS;
+    jobs.truncate(if paced { usize::MAX } else { WATCHER_MAX_JOBS });
     if !paced {
         // Picked up (or left to the background pass): either way not this
         // watcher's to read again next batch.
         conn.execute("DELETE FROM temp.lumen_touched", [])?;
     }
     let total = jobs.len() as u64;
-    let mut report = ContentReport { read: 0, with_text: 0, failed: 0, elapsed_ms: 0, cancelled: false };
+    let mut report = ContentReport { read: 0, with_text: 0, failed: 0, elapsed_ms: 0, cancelled: false, left };
     if jobs.is_empty() {
         report.elapsed_ms = started.elapsed().as_millis() as u64;
         on_progress(&ContentProgress { done: 0, total: 0, current: String::new(), finished: true });
@@ -326,7 +334,7 @@ pub fn extract_cancellable(path: &Path, ext: &str, cancel: &AtomicBool) -> Resul
     let raw = match ext.as_str() {
         "txt" | "md" | "markdown" | "org" | "rst" | "tex" | "csv" | "tsv" => read_text(path)?,
         "rtf" => strip_rtf(&read_text(path)?),
-        "html" | "htm" => strip_markup(&read_text(path)?),
+        "html" | "htm" | "xhtml" => strip_markup(&read_text(path)?),
         "docx" => zip_xml(path, |n| n == "word/document.xml" || n.starts_with("word/footnotes"))?,
         "pptx" => zip_xml(path, |n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))?,
         "xlsx" => zip_xml(path, |n| n == "xl/sharedStrings.xml")?,
@@ -455,6 +463,12 @@ pub(crate) fn strip_markup(s: &str) -> String {
             let head = s.as_bytes().get(i..i + end.len());
             if head.is_some_and(|h| h.eq_ignore_ascii_case(end.as_bytes())) {
                 skip_until = None; // fall through: the closing tag is skipped below
+                if end == "-->" {
+                    // Not a tag: step over the rest of "-->" here.
+                    chars.next();
+                    chars.next();
+                    continue;
+                }
             } else {
                 continue;
             }
@@ -468,6 +482,12 @@ pub(crate) fn strip_markup(s: &str) -> String {
             }
             if lower.starts_with("<style") {
                 skip_until = Some("</style");
+                continue;
+            }
+            if lower.starts_with("<!--") {
+                // An HTML comment, often old markup ("<!-- <div>draft</div>
+                // -->"): its words are not the page's.
+                skip_until = Some("-->");
                 continue;
             }
             let close = match rest.find('>') {
@@ -503,6 +523,15 @@ pub(crate) fn strip_markup(s: &str) -> String {
                     "quot" => Some('"'),
                     "apos" => Some('\''),
                     "nbsp" => Some(' '),
+                    // Common in saved web pages.
+                    "rsquo" => Some('\u{2019}'),
+                    "lsquo" => Some('\u{2018}'),
+                    "rdquo" => Some('\u{201d}'),
+                    "ldquo" => Some('\u{201c}'),
+                    "mdash" => Some('\u{2014}'),
+                    "ndash" => Some('\u{2013}'),
+                    "hellip" => Some('\u{2026}'),
+                    "copy" => Some('\u{a9}'),
                     e if e.starts_with("#x") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
                     e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
                     _ => None,
@@ -760,6 +789,9 @@ fn rtf_ansi_encoding(head: &str) -> Option<&'static encoding_rs::Encoding> {
 
 /// Collapse runs of whitespace, drop control characters, cap the length.
 pub(crate) fn normalize(s: &str) -> String {
+    // Precomposed, as queries are (a document written on a Mac can hold
+    // decomposed accents or Hangul).
+    let s = &*crate::nfc(s);
     let mut out = String::with_capacity(s.len().min(MAX_TEXT_CHARS * 3));
     let mut count = 0usize;
     let mut last_space = true;
@@ -850,11 +882,47 @@ mod tests {
     }
 
     #[test]
+    fn watcher_reads_a_capped_batch_and_asks_for_the_rest() {
+        // A big folder of old documents moved in: the watcher reads the
+        // first WATCHER_MAX_JOBS and says more are left; the rest are the
+        // next background pass's.
+        let dir = tempfile::tempdir().unwrap();
+        let moved = dir.path().join("home/Archive");
+        std::fs::create_dir_all(&moved).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(400 * 86_400);
+        for i in 0..=WATCHER_MAX_JOBS {
+            let p = moved.join(format!("note{i}.txt"));
+            std::fs::write(&p, format!("archived note {i}")).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+        let index = Index::open(dir.path().join("i.db")).unwrap();
+        let cfg = crate::Config { roots: vec![dir.path().join("home")], ..Default::default() };
+        let mut conn = index.writer().unwrap();
+        let (n, _) =
+            crate::scanner::apply_paths(&mut conn, std::slice::from_ref(&moved), &cfg.filter(), &cfg.effective_roots()).unwrap();
+        assert_eq!(n, WATCHER_MAX_JOBS + 1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let r = index_pending(&mut conn, &stop, false, |_| {}).unwrap();
+        assert_eq!(r.read, WATCHER_MAX_JOBS as u64);
+        assert!(r.left, "the rest must be handed to a background pass");
+        // The next live batch does not pick them up (they are old)...
+        let r = index_pending(&mut conn, &stop, false, |_| {}).unwrap();
+        assert_eq!((r.read, r.left), (0, false));
+        // ...the background pass does.
+        let r = index_content(&index, stop, |_| {}).unwrap();
+        assert_eq!((r.read, r.left), (1, false));
+    }
+
+    #[test]
     fn markup_and_entities() {
         let x = "<w:p><w:r><w:t>租赁&amp;合同</w:t></w:r></w:p><w:p><w:t>第二段 &#x4E2D;</w:t></w:p>";
         assert_eq!(normalize(&strip_markup(x)), "租赁&合同 第二段 中");
         let h = "<html><style>p{}</style><p>Hello <b>world</b></p><script>var a</script></html>";
         assert_eq!(normalize(&strip_markup(h)), "Hello world");
+        // Saved web pages: comments (often old markup) and typographic
+        // entities.
+        let h = "<p>Don&rsquo;t&nbsp;panic</p><!-- <div>old draft</div> a > b --><p>&ldquo;ok&rdquo; &mdash; done</p>";
+        assert_eq!(normalize(&strip_markup(h)), "Don\u{2019}t panic \u{201c}ok\u{201d} \u{2014} done");
     }
 
     #[test]

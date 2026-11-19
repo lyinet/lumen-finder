@@ -71,6 +71,7 @@ pub fn scan(
     let roots = cfg.effective_roots();
     let filter = cfg.filter();
     let mut writer = index.writer()?;
+    precompose_names_once(&mut writer)?;
     let gen = get_meta_i64(&writer, "generation")?.unwrap_or(0) + 1;
     let full = gen == 1;
 
@@ -175,6 +176,35 @@ pub fn scan(
     })
 }
 
+/// Names and folders are stored precomposed since 0.8.2 (see `crate::nfc`).
+/// A rescan does not rewrite the name of a row it already has, so rows from
+/// before keep a decomposed name, which a typed query never finds: fix them
+/// once, on the scan's own (background) connection.
+fn precompose_names_once(conn: &mut rusqlite::Connection) -> Result<()> {
+    if get_meta_i64(conn, "nfc_v1")?.is_some() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    {
+        let mut read = tx.prepare("SELECT id, name, parent FROM files")?;
+        let fix: Vec<(i64, String, String)> = read
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, name, parent): (i64, String, String)| {
+                let (n, p) = (crate::nfc(&name), crate::nfc(&parent));
+                (n != name.as_str() || p != parent.as_str()).then(|| (id, n.into_owned(), p.into_owned()))
+            })
+            .collect();
+        let mut put = tx.prepare("UPDATE files SET name = ?2, name_py = ?3, parent = ?4 WHERE id = ?1")?;
+        for (id, name, parent) in fix {
+            put.execute(rusqlite::params![id, name, crate::pinyin_key(&name), parent])?;
+        }
+    }
+    set_meta(&tx, "nfc_v1", 1)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// A configured root that is missing but may come back: on a drive that is
 /// not mounted, or still present as an entry (a link to an unplugged drive,
 /// a folder Lumen may not look at). Only a root that no longer exists at all
@@ -232,14 +262,32 @@ fn snapshot(c: &Counters, phase: ScanPhase, started: Instant) -> ScanProgress {
 }
 
 fn write_batch(conn: &mut rusqlite::Connection, batch: &[NewFile], gen: i64) -> Result<()> {
+    write_rows(conn, batch, gen, false)
+}
+
+/// `touched`: also remember the rows for the watcher's reading (see
+/// `TOUCHED`), in the same transaction: one commit per batch, not one per
+/// file.
+fn write_rows(conn: &mut rusqlite::Connection, batch: &[NewFile], gen: i64, touched: bool) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
+    }
+    if touched {
+        conn.execute_batch(TOUCHED)?;
     }
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare_cached(UPSERT)?;
         for f in batch {
             f.upsert(&mut stmt, gen)?;
+        }
+        if touched {
+            let mut mark = tx.prepare_cached(
+                "INSERT OR IGNORE INTO temp.lumen_touched(id) SELECT id FROM files WHERE path = ?1",
+            )?;
+            for f in batch {
+                mark.execute([&f.path])?;
+            }
         }
     }
     tx.commit()?;
@@ -367,8 +415,7 @@ pub(crate) fn index_tree(conn: &mut rusqlite::Connection, dir: &Path, filter: &P
     }
     let n = files.len();
     for chunk in files.chunks(BATCH) {
-        write_batch(conn, chunk, gen)?;
-        mark_touched(conn, chunk)?;
+        write_rows(conn, chunk, gen, true)?;
     }
     Ok(n)
 }
@@ -380,14 +427,124 @@ pub(crate) fn index_tree(conn: &mut rusqlite::Connection, dir: &Path, filter: &P
 /// files saved in the last hour.
 pub(crate) const TOUCHED: &str = "CREATE TEMP TABLE IF NOT EXISTS lumen_touched (id INTEGER PRIMARY KEY)";
 
-fn mark_touched(conn: &rusqlite::Connection, files: &[NewFile]) -> Result<()> {
-    conn.execute_batch(TOUCHED)?;
-    let mut stmt =
-        conn.prepare_cached("INSERT OR IGNORE INTO temp.lumen_touched(id) SELECT id FROM files WHERE path = ?1")?;
-    for f in files {
-        stmt.execute([&f.path])?;
+
+/// One name in a folder, compared the way macOS compares names: by
+/// precomposed form.
+fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    a == b || matches!((a.to_str(), b.to_str()), (Some(a), Some(b)) if crate::nfc(a) == crate::nfc(b))
+}
+
+/// A name that has a single Unicode spelling (ASCII, Chinese, most others):
+/// no folder listing needed to know how the disk spells it.
+fn one_form(name: &std::ffi::OsStr) -> bool {
+    use unicode_normalization::{is_nfc_quick, is_nfd_quick, IsNormalized};
+    match name.to_str() {
+        Some(s) => {
+            s.is_ascii()
+                || (is_nfc_quick(s.chars()) == IsNormalized::Yes && is_nfd_quick(s.chars()) == IsNormalized::Yes)
+        }
+        None => true,
     }
-    Ok(())
+}
+
+/// A path from a file-system event, spelled as the walk spells it.
+struct Spelled {
+    /// The configured root, then each name as the folder lists it, as far as
+    /// those names exist; then the rest as the event spelled it.
+    path: PathBuf,
+    /// How many of `path`'s trailing names were not found on disk.
+    missing: usize,
+    /// Spellings the event used that the folder does not list: rows stored
+    /// under them are not files on disk (left by an older Lumen, or a twin
+    /// that was removed on a disk that tells the forms apart).
+    stale: Vec<PathBuf>,
+}
+
+/// An event may spell an accented (or Hangul) name in the other Unicode
+/// form than the folder lists it, and the disk opens either. The walk
+/// stores the folder's spelling, so a live update in the event's spelling
+/// added a second row for the file, and a removal left the first one.
+/// Only names that can be spelled two ways are looked up (one folder
+/// listing each, cached for the batch); ASCII and Chinese names are not.
+fn spell_as_listed(
+    p: &Path,
+    roots: &[PathBuf],
+    listings: &mut std::collections::HashMap<PathBuf, Vec<std::ffi::OsString>>,
+) -> Spelled {
+    let unchanged = || Spelled { path: p.to_path_buf(), missing: 0, stale: Vec::new() };
+    if p.to_str().is_none_or(|s| s.is_ascii()) {
+        return unchanged();
+    }
+    let comps: Vec<&std::ffi::OsStr> = p.iter().collect();
+    // The innermost root it lies under, in the root's configured spelling.
+    let root = roots
+        .iter()
+        .filter(|r| {
+            let rc: Vec<&std::ffi::OsStr> = r.iter().collect();
+            rc.len() <= comps.len() && rc.iter().zip(&comps).all(|(a, b)| same_name(a, b))
+        })
+        .max_by_key(|r| r.as_os_str().len());
+    let Some(root) = root else { return unchanged() };
+    let mut out = root.clone();
+    let mut stale = Vec::new();
+    let mut missing = 0;
+    for name in &comps[root.iter().count()..] {
+        if missing > 0 {
+            out.push(name);
+            missing += 1;
+            continue;
+        }
+        if one_form(name) {
+            out.push(name);
+            continue;
+        }
+        let listed = listings.entry(out.clone()).or_insert_with(|| {
+            std::fs::read_dir(&out).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
+        });
+        if listed.iter().any(|e| e == name) {
+            out.push(name);
+        } else if let Some(real) = listed.iter().find(|e| same_name(e, name)) {
+            stale.push(out.join(name));
+            out.push(real);
+        } else {
+            out.push(name);
+            missing = 1;
+        }
+    }
+    Spelled { path: out, missing, stale }
+}
+
+/// Every spelling of a path whose last `missing` names are gone: the walk
+/// may have stored them either way.
+fn gone_spellings(p: &Path, missing: usize) -> Vec<PathBuf> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = vec![p.to_path_buf()];
+    let comps: Vec<&std::ffi::OsStr> = p.iter().collect();
+    if missing == 0 || missing > comps.len() {
+        return out;
+    }
+    let (head, tail) = comps.split_at(comps.len() - missing);
+    let Some(tail) = tail.iter().map(|c| c.to_str()).collect::<Option<Vec<&str>>>() else { return out };
+    let base: PathBuf = head.iter().collect();
+    for form in [tail.join("/").nfc().collect::<String>(), tail.join("/").nfd().collect::<String>()] {
+        let q = base.join(form);
+        if !out.contains(&q) {
+            out.push(q);
+        }
+    }
+    out
+}
+
+/// `p` under the root it belongs to, when it was reported under the real
+/// location of a root that is a link.
+fn as_under_root(p: &Path, roots: &[PathBuf], targets: &[(PathBuf, &PathBuf)]) -> PathBuf {
+    if roots.iter().any(|r| p.starts_with(r)) {
+        return p.to_path_buf();
+    }
+    match targets.iter().filter(|(c, _)| p.starts_with(c)).max_by_key(|(c, _)| c.as_os_str().len()) {
+        Some((c, r)) => r.join(p.strip_prefix(c).unwrap_or(p)),
+        None => p.to_path_buf(),
+    }
 }
 
 /// Apply a set of changed paths reported by the file system.
@@ -399,7 +556,21 @@ pub(crate) fn apply_paths(
 ) -> Result<(usize, usize)> {
     let gen = get_meta_i64(conn, "generation")?.unwrap_or(0).max(1);
     let (mut upserted, mut removed) = (0, 0);
+    let mut listings = std::collections::HashMap::new();
+    // A root that is a link (to a drive, or another folder): FSEvents reports
+    // its files under the link's target, which lies under no root, so every
+    // live change in it was dropped until the next scan.
+    let targets: Vec<(PathBuf, &PathBuf)> = roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok().filter(|c| c != r).map(|c| (c, r)))
+        .collect();
     for p in paths {
+        let p = &as_under_root(p, roots, &targets);
+        let spelled = spell_as_listed(p, roots, &mut listings);
+        for s in &spelled.stale {
+            removed += remove_tree(conn, &s.to_string_lossy())?;
+        }
+        let p = &spelled.path;
         if !filter.allow_path_chain(p, roots) {
             continue;
         }
@@ -420,8 +591,7 @@ pub(crate) fn apply_paths(
                 if let Some(kind) = filter.classify_file(p) {
                     if filter.keep_size(p, &meta) {
                         if let Some(f) = NewFile::from_path(p, kind, &meta) {
-                            write_batch(conn, std::slice::from_ref(&f), gen)?;
-                            mark_touched(conn, std::slice::from_ref(&f))?;
+                            write_rows(conn, std::slice::from_ref(&f), gen, true)?;
                             upserted += 1;
                         }
                     } else {
@@ -437,7 +607,11 @@ pub(crate) fn apply_paths(
             // privacy settings, chmod) keeps its files listed. Only a path that
             // no longer exists is removed.
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-            Err(_) => removed += remove_tree(conn, &p.to_string_lossy())?,
+            Err(_) => {
+                for q in gone_spellings(p, spelled.missing) {
+                    removed += remove_tree(conn, &q.to_string_lossy())?;
+                }
+            }
         }
     }
     Ok((upserted, removed))
@@ -521,5 +695,93 @@ mod tests {
         let mut conn = index.writer().unwrap();
         assert_eq!(apply_paths(&mut conn, &[file], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
         assert_eq!(index.file_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn event_in_the_other_unicode_form_is_the_same_file() {
+        // The disk keeps "Résumé/Café.txt" decomposed (NFD); a file-system
+        // event names it precomposed (NFC), or the other way round. That used
+        // to add a second row for the same file, and a removal reported in
+        // the other form left the old row behind.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let folder_nfd = home.join("Re\u{301}sume\u{301}");
+        let file_nfd = folder_nfd.join("Cafe\u{301}.txt");
+        let file_nfc = home.join("R\u{e9}sum\u{e9}").join("Caf\u{e9}.txt");
+        std::fs::create_dir_all(&folder_nfd).unwrap();
+        std::fs::write(&file_nfd, b"some notes").unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let (filter, roots) = (cfg.filter(), cfg.effective_roots());
+        let mut conn = index.writer().unwrap();
+
+        std::fs::write(&file_nfd, b"some longer notes").unwrap();
+        assert_eq!(apply_paths(&mut conn, std::slice::from_ref(&file_nfc), &filter, &roots).unwrap(), (1, 0));
+        assert_eq!(index.file_count().unwrap(), 1, "a second row for the same file");
+        let size: i64 = conn.query_row("SELECT size FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(size, 17);
+        // Its folder reported in the other form: same rows again.
+        apply_paths(&mut conn, &[home.join("R\u{e9}sum\u{e9}")], &filter, &roots).unwrap();
+        assert_eq!(index.file_count().unwrap(), 1);
+
+        // A file of the other form that really is a different file (a disk
+        // that tells the two apart) is not removed for the gone one.
+        std::fs::write(folder_nfd.join("Caf\u{e9}.txt"), b"twin file").unwrap();
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(index.file_count().unwrap(), 2);
+        std::fs::remove_file(folder_nfd.join("Caf\u{e9}.txt")).unwrap();
+        apply_paths(&mut conn, std::slice::from_ref(&file_nfc), &filter, &roots).unwrap();
+        assert_eq!(index.file_count().unwrap(), 1);
+        let left: String = conn.query_row("SELECT path FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, file_nfd.to_string_lossy());
+
+        // Removed, reported in the other form.
+        std::fs::remove_file(&file_nfd).unwrap();
+        assert_eq!(apply_paths(&mut conn, &[file_nfc], &filter, &roots).unwrap(), (0, 1));
+        assert_eq!(index.file_count().unwrap(), 0, "the gone file stayed listed");
+        // A rescan agrees.
+        let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(r.added + r.removed, 0);
+    }
+
+    #[test]
+    fn root_named_in_the_other_unicode_form() {
+        // The root folder itself has an accented name and events spell it
+        // the other way: they used to fall outside every root and be dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("Docume\u{301}nts");
+        std::fs::create_dir_all(&home).unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        std::fs::write(home.join("plan.pdf"), b"pdf").unwrap();
+        let mut conn = index.writer().unwrap();
+        let event = dir.path().join("Docum\u{e9}nts/plan.pdf");
+        assert_eq!(apply_paths(&mut conn, &[event], &cfg.filter(), &cfg.effective_roots()).unwrap(), (1, 0));
+        let p: String = conn.query_row("SELECT path FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(p, home.join("plan.pdf").to_string_lossy());
+    }
+
+    #[test]
+    fn root_that_is_a_link_gets_live_updates() {
+        // FSEvents names changes by the real location, not the link the root
+        // was chosen through.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real/Notes");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.path().join("Notes");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![link.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        std::fs::write(target.join("plan.pdf"), b"pdf").unwrap();
+        let event = std::fs::canonicalize(&target).unwrap().join("plan.pdf");
+        let mut conn = index.writer().unwrap();
+        assert_eq!(apply_paths(&mut conn, std::slice::from_ref(&event), &cfg.filter(), &cfg.effective_roots()).unwrap(), (1, 0));
+        let p: String = conn.query_row("SELECT path FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(p, link.join("plan.pdf").to_string_lossy(), "stored as the scan stores it");
+        std::fs::remove_file(target.join("plan.pdf")).unwrap();
+        assert_eq!(apply_paths(&mut conn, &[event], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
     }
 }

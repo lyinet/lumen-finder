@@ -331,7 +331,14 @@ fn restart_watcher(app: &AppHandle) {
     *slot = None; // stop the old stream first
     match Watcher::start(&state.index, &cfg, move |batch| {
         let plugged = batch.volumes_changed;
+        let left = batch.content_left;
         let _ = emitter.emit("index://changed", batch);
+        if left && !plugged {
+            // A big folder moved in: the watcher read the first documents,
+            // a paced background pass reads the rest now instead of at the
+            // next scan (often the next launch).
+            run_content(&emitter);
+        }
         if plugged {
             // A drive came or went: pick up its files, or mark them offline.
             let app = emitter.clone();

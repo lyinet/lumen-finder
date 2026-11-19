@@ -409,6 +409,14 @@ fn opened_files_rank_first_and_suggestions() {
     let (dir, index, cfg) = setup();
     let home = dir.path().join("home");
     touch(&home.join("Desktop/trip plan.pdf"), b"plan");
+    // Older than the others for sure (same-second mtimes made the "newest"
+    // below a coin toss on a busy machine).
+    fs::File::options()
+        .write(true)
+        .open(home.join("Desktop/old/trip copy.mov"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
     scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     // All three start with "tri" (same tier); the newest wins until one is opened.
     let before = q(&index, "tri");

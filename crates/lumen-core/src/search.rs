@@ -73,7 +73,10 @@ pub(crate) struct Parsed {
 
 pub(crate) fn parse(q: &str) -> Parsed {
     let mut p = Parsed::default();
-    for tok in tokenize(q) {
+    // Names and text are stored precomposed: a query pasted in decomposed
+    // form (copied from a file name) must match them too.
+    let q = crate::nfc(q);
+    for tok in tokenize(&q) {
         let (quoted, tok) = match tok {
             Tok::Quoted(s) => (true, s),
             Tok::Word(s) => (false, s),

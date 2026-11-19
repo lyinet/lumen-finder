@@ -115,17 +115,19 @@ fn scan_read_search_mutate_reset() {
     let all = names(index, "kind:document");
     assert!(!all.iter().any(|n| n.contains("secret") || n.contains("visible-inside") || n == "out.txt"), "{all:?}");
     assert!(names(index, "dump").is_empty(), "*.csv skipped");
-    assert_eq!(r.files, 12, "{:?}", names(index, "after:1970"));
+    assert_eq!(r.files, 13, "{:?}", names(index, "after:1970"));
 
     let c = index_content(index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
-    assert_eq!(c.read, 9, "{c:?}");
+    assert_eq!(c.read, 10, "{c:?}");
     assert_eq!(c.failed, 0);
 
     // Words inside, in every format.
     assert_eq!(names(index, "lighthouse"), v(&["notes.txt"]));
     assert_eq!(names(index, "zebra"), v(&["readme.md"]));
-    // .html is not a kind Lumen lists, so its words are not read either.
-    assert!(names(index, "marmalade").is_empty());
+    // Saved web pages are documents: their text is read, scripts are not.
+    assert_eq!(names(index, "marmalade"), v(&["page.html"]));
+    assert!(names(index, "scripted").is_empty());
+    assert!(names(index, "kind:document").contains(&"page.html".to_string()));
     assert_eq!(names(index, "walrus"), v(&["letter.rtf"]));
     assert_eq!(names(index, "pelican"), v(&["contract.docx"]));
     assert_eq!(names(index, "销售额"), v(&["年度报告.txt"]));
@@ -156,7 +158,7 @@ fn scan_read_search_mutate_reset() {
     assert_eq!(names(index, "\"lighthouse project\""), v(&["notes.txt"]));
     assert_eq!(names(index, "budget kind:document in:Documents"), v(&["notes.txt"]));
     assert!(names(index, "budget kind:image").is_empty());
-    assert!(names(index, "\"\"").len() <= 12);
+    assert!(names(index, "\"\"").len() <= 13);
     assert!(names(index, "nonexistentword").is_empty());
 
     // Live changes.
@@ -211,7 +213,7 @@ fn scan_read_search_mutate_reset() {
     assert!(names(index, "zebra").is_empty());
     let r = scan(index, &t.cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     assert!(r.full);
-    assert_eq!(r.files, 11);
+    assert_eq!(r.files, 12);
     index_content(index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     assert_eq!(names(index, "zebra"), v(&["guide.md"]));
     assert_eq!(names(index, "lighthouse"), v(&["notes.txt"]));
