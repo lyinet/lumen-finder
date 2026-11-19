@@ -562,3 +562,32 @@ fn an_index_from_before_ocr_marks_opens_and_searches() {
     let index = Index::open(&db).unwrap();
     assert!(index.search(&SearchRequest { query: "x".into(), ..Default::default() }).is_ok());
 }
+
+/// An unplugged drive: the root stays in the saved settings, its files stay
+/// searchable (marked offline) through rescans, and the
+/// mounted roots around it are scanned as usual.
+#[test]
+fn offline_drive_root_kept_in_settings_and_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("a.txt"), b"hello");
+    let vol = std::path::PathBuf::from("/Volumes/__lumen_unplugged_drive__");
+    assert!(!vol.exists());
+    let cfg_path = dir.path().join("config.json");
+    let cfg = Config { roots: vec![home.clone(), vol.join("Movies")], ..Config::default() };
+    cfg.save(&cfg_path).unwrap();
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    index.insert_files(&[nf("/Volumes/__lumen_unplugged_drive__/Movies/trip.mp4", Kind::Video, 10, 1_700_000_000)]).unwrap();
+
+    for _ in 0..2 {
+        let cfg = Config::load(&cfg_path);
+        assert_eq!(cfg.roots, vec![home.clone(), vol.join("Movies")], "the unplugged root is still configured");
+        assert_eq!(cfg.effective_roots(), vec![home.clone()], "only walked roots are skipped");
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        cfg.save(&cfg_path).unwrap();
+    }
+    let r = index.search(&SearchRequest { query: "trip".into(), ..Default::default() }).unwrap();
+    assert_eq!(r.hits.len(), 1);
+    assert!(r.hits[0].offline);
+    assert_eq!(names(&index, "a.txt"), vec!["a.txt"]);
+}

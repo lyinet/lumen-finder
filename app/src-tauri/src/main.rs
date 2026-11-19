@@ -679,7 +679,9 @@ fn show_in_main(app: AppHandle, query: String) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
-        let _ = w.emit("app://query", query);
+        // To this window only: `emit` goes to every window, and the panel
+        // (which also listens for app://query) re-ran the query behind it.
+        let _ = w.emit_to("main", "app://query", query);
     }
 }
 
@@ -705,9 +707,9 @@ fn open_link(app: &AppHandle, url: &tauri::Url) {
         if !app.get_webview_window("quick").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false) {
             toggle_quick(app);
         }
-        if let Some(w) = app.get_webview_window("quick") {
-            let _ = w.emit("app://query", query);
-        }
+        // To the panel only: `emit` reaches every window, and the main
+        // window switched to search with the panel's query, losing its view.
+        let _ = app.emit_to("quick", "app://query", query);
         return;
     }
     let link = Link { mode: if host == "ask" { "ask".into() } else { "search".into() }, query };
