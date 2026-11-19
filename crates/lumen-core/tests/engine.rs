@@ -475,3 +475,31 @@ fn damaged_index_is_rebuilt_and_reset_forgets() {
     assert_eq!(q(&idx2, "nzzj"), vec!["2024年终总结.key"]);
     drop(index);
 }
+
+#[cfg(unix)]
+#[test]
+fn ocr_matches_in_scanned_pdfs_are_marked() {
+    // The UI labels a scanned PDF's match "in image" from `ocr`; nothing sent
+    // it, so every OCR'd PDF said "in text".
+    let _turn = CONTENT.lock().unwrap_or_else(|e| e.into_inner());
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("Scans/lease-scan.pdf"), b"SCANNED no text layer here");
+    docx(&home.join("Work/lease.docx"), "租赁合同 押金条款");
+    let helper = dir.path().join("fake-ocr");
+    touch(&helper, "#!/bin/sh\ncase \"$(head -c 7 \"$1\")\" in\n  SCANNED) echo '租赁合同 押金 扫描';;\n  *) ;;\nesac\n".as_bytes());
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    set_ocr_helper(Some(helper));
+    index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    set_ocr_helper(None);
+    let r = index.search(&SearchRequest { query: "押金".into(), ..Default::default() }).unwrap();
+    let mut got: Vec<(String, bool, bool)> = r.hits.iter().map(|h| (h.name.clone(), h.ocr, h.snippet.is_some())).collect();
+    got.sort();
+    assert_eq!(got, vec![("lease-scan.pdf".into(), true, true), ("lease.docx".into(), false, true)]);
+    let json = serde_json::to_value(r.hits.iter().find(|h| h.name == "lease-scan.pdf").unwrap()).unwrap();
+    assert_eq!(json["ocr"], true);
+}

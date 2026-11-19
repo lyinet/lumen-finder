@@ -96,10 +96,12 @@ function mockBridge() {
     ['document', '读书笔记 - 置身事内', 'docx', 'Documents/学习/研究生', '地方政府的土地财政与招商引资，决定了过去二十年的城市化速度。'],
     ['pdf', 'Quarterly report Q3', 'pdf', 'Downloads', 'Quarterly revenue grew 42% year over year, led by subscriptions in Japan and Korea.'],
     ['spreadsheet', '家庭预算2025', 'xlsx', 'Documents/个人', '房贷 8200 · 物业 460 · 孩子兴趣班 1800 · 旅行基金 3000 · 合同保险 920'],
+    // A scanned PDF: its words came from OCR, so the row says "in image".
+    ['pdf', 'Scan_20250312', 'pdf', 'Documents/扫描', '房屋租赁合同 出租方 承租方 押金两个月 租期自2025年3月起', true],
   ]
-  for (const [kind, base, ext, folder, text] of TEXTS) {
+  for (const [kind, base, ext, folder, text, ocr] of TEXTS) {
     const parent = `${HOME}/${folder}`
-    files.push({ id: files.length + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind, size: 380000, mtime: now - 86400 * (3 + files.length % 40), text })
+    files.push({ id: files.length + 1, name: `${base}.${ext}`, parent, path: `${parent}/${base}.${ext}`, ext, kind, size: 380000, mtime: now - 86400 * (3 + files.length % 40), text, ...(ocr ? { ocr: true } : {}) })
   }
   for (const [name, kind, ext] of [['北海道旅行 原片', 'video', 'mov'], ['相册备份 2019', 'archive', 'zip'], ['合同扫描 归档', 'pdf', 'pdf']]) {
     const parent = '/Volumes/Passport/归档'
@@ -151,7 +153,8 @@ function mockBridge() {
       const i = f.text.toLowerCase().indexOf(t), a = Math.max(0, i - 18)
       return (a ? '…' : '') + f.text.slice(a, i + t.length + 36) + (i + t.length + 36 < f.text.length ? '…' : '')
     }
-    const page = hits.slice(off, off + (req.limit || 60)).map(f => ({ ...f, offline: !!f.offline, cloud: !!f.cloud, snippet: snip(f), text: undefined }))
+    // Like the core: `ocr` only rides along with a snippet it describes.
+    const page = hits.slice(off, off + (req.limit || 60)).map(f => { const snippet = snip(f); return { ...f, offline: !!f.offline, cloud: !!f.cloud, snippet, ocr: !!(snippet && f.ocr) || undefined, text: undefined } })
     return { hits: page, total: hits.length, kind_counts, took_us: Math.round((performance.now() - t0) * 1000) + 300 }
   }
 
@@ -173,7 +176,7 @@ function mockBridge() {
       if (!n) continue
       let s = v.reduce((a, x, i) => a + x * qv[i], 0) / (n * qn)
       for (const [w, re] of Object.entries(DATES)) if (req.query.includes(w) && re.test(f.name)) s += .08
-      if (s > .58 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, score: Math.min(.97, s * .93) })
+      if (s > .58 && (!req.kinds?.length || req.kinds.includes(f.kind))) hits.push({ ...f, text: undefined, ocr: undefined, score: Math.min(.97, s * .93) })
     }
     hits.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
     return { hits: hits.slice(0, req.limit || 40), indexed: files.length, took_us: Math.round((performance.now() - t0) * 1000) + 9000 }
@@ -244,7 +247,7 @@ function mockBridge() {
       const by = {}
       files.forEach(f => { const m = by[ym(f.mtime)] ||= { month: ym(f.mtime), files: 0, bytes: 0, k: {} }; m.files += 37; m.bytes += f.size * 37; m.k[f.kind] = (m.k[f.kind] || 0) + 37 })
       return Object.values(by).sort((a, b) => b.month.localeCompare(a.month))
-        .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([kind, files]) => ({ kind, files })) }))
+        .map(m => ({ month: m.month, files: m.files, bytes: m.bytes, kinds: Object.entries(m.k).sort((a, b) => b[1] - a[1]).map(([kind, files]) => ({ kind, files })) }))
     },
     month: async (month, kind, limit) => {
       const ym = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }

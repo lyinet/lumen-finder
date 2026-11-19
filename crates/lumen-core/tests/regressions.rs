@@ -530,3 +530,35 @@ fn overlapping_roots_index_each_file_once() {
     scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     assert_eq!(all_names(&index), vec!["plan.pdf", "top.pdf"]);
 }
+
+#[test]
+fn a_month_lists_every_kind_it_has() {
+    // A big month's view counts kinds from the timeline (it only loads the
+    // newest 1000 files); kinds past the fourth were dropped there, so their
+    // chips counted only what was among those 1000.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    for (i, ext) in ["pdf", "docx", "xlsx", "pptx", "jpg", "mp4"].iter().enumerate() {
+        for j in 0..=i {
+            touch(&home.join(format!("f{i}_{j}.{ext}")), b"x");
+        }
+    }
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    scan(&index, &Config { roots: vec![home], ..Config::default() }, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    let months = index.timeline(24).unwrap();
+    assert_eq!(months.len(), 1);
+    assert_eq!(months[0].kinds.len(), 6);
+    assert_eq!(months[0].kinds.iter().map(|k| k.files).sum::<i64>(), months[0].files);
+}
+
+#[test]
+fn an_index_from_before_ocr_marks_opens_and_searches() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    drop(Index::open(&db).unwrap());
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("ALTER TABLE content DROP COLUMN ocr;").unwrap();
+    drop(conn);
+    let index = Index::open(&db).unwrap();
+    assert!(index.search(&SearchRequest { query: "x".into(), ..Default::default() }).is_ok());
+}

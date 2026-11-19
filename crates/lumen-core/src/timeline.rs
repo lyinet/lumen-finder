@@ -20,7 +20,8 @@ pub struct MonthStat {
     pub month: String,
     pub files: i64,
     pub bytes: i64,
-    /// Biggest kinds this month by file count, at most four.
+    /// Every kind this month, biggest by file count first (the timeline
+    /// draws the first few; a month's view counts its chips from all).
     pub kinds: Vec<KindCount>,
 }
 
@@ -66,7 +67,6 @@ impl Index {
             }
             for m in &mut out {
                 m.kinds.sort_by_key(|k| std::cmp::Reverse(k.files));
-                m.kinds.truncate(4);
             }
             Ok(out)
         })

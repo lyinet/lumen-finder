@@ -262,7 +262,7 @@ pub(crate) fn index_pending(
     // Extract on worker threads (PDFs are CPU-bound), write on this one.
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 6);
     let (job_tx, job_rx) = crossbeam_channel::bounded::<Job>(threads * 4);
-    let (out_tx, out_rx) = crossbeam_channel::bounded::<(Job, Option<String>, bool)>(threads * 4);
+    let (out_tx, out_rx) = crossbeam_channel::bounded::<(Job, Option<String>, bool, bool)>(threads * 4);
     let mut workers = Vec::new();
     for _ in 0..threads {
         let rx = job_rx.clone();
@@ -277,16 +277,16 @@ pub(crate) fn index_pending(
                 if cancel.load(Ordering::Relaxed) || (paced && !crate::pace::wait(&cancel)) {
                     break;
                 }
-                let (text, failed) = match extract_cancellable(Path::new(&job.path), &job.ext, &cancel) {
-                    Ok(t) => (t, false),
-                    Err(_) => (None, true),
+                let (text, failed, by_ocr) = match extract_marked(Path::new(&job.path), &job.ext, &cancel) {
+                    Ok((t, o)) => (t, false, o),
+                    Err(_) => (None, true, false),
                 };
                 // Cut short: not a failure, and not "no text" either. Leave
                 // it unread so the next pass reads it whole.
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if tx.send((job, text, failed)).is_err() {
+                if tx.send((job, text, failed, by_ocr)).is_err() {
                     break;
                 }
             }
@@ -304,7 +304,7 @@ pub(crate) fn index_pending(
         })
     };
 
-    let mut pending: Vec<(Job, Option<String>, bool)> = Vec::new();
+    let mut pending: Vec<(Job, Option<String>, bool, bool)> = Vec::new();
     let mut last_tick = Instant::now() - Duration::from_secs(1);
     let mut current = String::new();
     for item in out_rx.iter() {
@@ -337,19 +337,19 @@ pub(crate) fn index_pending(
     Ok(report)
 }
 
-fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool)]) -> Result<()> {
+fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool, bool)]) -> Result<()> {
     if items.is_empty() {
         return Ok(());
     }
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO content (id, mtime, size, body) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, body = excluded.body",
+            "INSERT INTO content (id, mtime, size, body, ocr) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, body = excluded.body, ocr = excluded.ocr",
         )?;
         let mut fts_del = tx.prepare_cached("DELETE FROM content_fts WHERE rowid = ?1")?;
         let mut fts_ins = tx.prepare_cached("INSERT INTO content_fts(rowid, toks) VALUES (?1, ?2)")?;
-        for (job, text, _) in items {
+        for (job, text, _, by_ocr) in items {
             // The file may have left the index while it was being read, and
             // its id may since belong to another file (ids restart after a
             // reset and the highest one is reused after a delete).
@@ -358,7 +358,7 @@ fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool)]) -> Result
                 .unwrap_or(false);
             if exists {
                 let body = text.as_deref().unwrap_or("");
-                stmt.execute(params![job.id, job.mtime, job.size, body])?;
+                stmt.execute(params![job.id, job.mtime, job.size, body, by_ocr])?;
                 fts_del.execute([job.id])?;
                 if !body.is_empty() {
                     fts_ins.execute(params![job.id, crate::cjk::index_text(body)])?;
@@ -379,7 +379,13 @@ pub fn extract(path: &Path, ext: &str) -> Result<Option<String>> {
 
 /// `extract`, giving up on a slow OCR read as soon as `cancel` is set.
 pub fn extract_cancellable(path: &Path, ext: &str, cancel: &AtomicBool) -> Result<Option<String>> {
+    extract_marked(path, ext, cancel).map(|(t, _)| t)
+}
+
+/// `extract_cancellable`, plus whether the text came from OCR.
+fn extract_marked(path: &Path, ext: &str, cancel: &AtomicBool) -> Result<(Option<String>, bool)> {
     let ext = ext.to_ascii_lowercase();
+    let mut by_ocr = false;
     let raw = match ext.as_str() {
         "txt" | "md" | "markdown" | "org" | "rst" | "tex" | "csv" | "tsv" => read_text(path)?,
         "rtf" => strip_rtf(&read_text(path)?),
@@ -395,16 +401,20 @@ pub fn extract_cancellable(path: &Path, ext: &str, cancel: &AtomicBool) -> Resul
         "pdf" => {
             let t = pdf_text(path).unwrap_or_default();
             if t.trim().chars().count() < SCANNED_PDF_CHARS && ocr_helper().is_some() {
+                by_ocr = true;
                 ocr(path, cancel)?
             } else {
                 t
             }
         }
-        e if OCR_EXTS.contains(&e) => ocr(path, cancel)?,
-        _ => return Ok(None),
+        e if OCR_EXTS.contains(&e) => {
+            by_ocr = true;
+            ocr(path, cancel)?
+        }
+        _ => return Ok((None, false)),
     };
     let text = normalize(&raw);
-    Ok(if text.is_empty() { None } else { Some(text) })
+    Ok(if text.is_empty() { (None, false) } else { (Some(text), by_ocr) })
 }
 
 fn read_text(path: &Path) -> Result<String> {
@@ -935,7 +945,7 @@ mod tests {
         let id2: i64 = index.conn().query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(id, id2, "ids restart after a reset");
         let mut conn = index.writer().unwrap();
-        write(&mut conn, &[(job, Some("secret words".into()), false)]).unwrap();
+        write(&mut conn, &[(job, Some("secret words".into()), false, false)]).unwrap();
         assert_eq!(index.content(id2).unwrap().unwrap_or_default(), "");
     }
 

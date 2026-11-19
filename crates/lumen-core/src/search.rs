@@ -549,15 +549,16 @@ fn records_by_id(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRec
 /// For hits whose name does not show why they matched, an excerpt of the
 /// text around the first matching word.
 fn add_snippets(conn: &rusqlite::Connection, hits: &mut [FileRecord], terms: &[String]) -> Result<()> {
-    let mut stmt = conn.prepare_cached("SELECT body FROM content WHERE id = ?1")?;
+    let mut stmt = conn.prepare_cached("SELECT body, ocr FROM content WHERE id = ?1")?;
     for h in hits.iter_mut() {
         let name = h.name.to_lowercase();
         if terms.iter().all(|t| name.contains(&t.to_lowercase())) {
             continue;
         }
-        let body: Option<String> = stmt.query_row([h.id], |r| r.get(0)).ok();
-        if let Some(body) = body {
+        let row: Option<(String, bool)> = stmt.query_row([h.id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+        if let Some((body, ocr)) = row {
             h.snippet = crate::content::snippet(&body, terms, 28);
+            h.ocr = ocr && h.snippet.is_some();
         }
     }
     Ok(())

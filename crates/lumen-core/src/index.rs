@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS content (
     id    INTEGER PRIMARY KEY,
     mtime INTEGER NOT NULL,
     size  INTEGER NOT NULL,
-    body  TEXT NOT NULL DEFAULT ''
+    body  TEXT NOT NULL DEFAULT '',
+    ocr   INTEGER NOT NULL DEFAULT 0
 );
 -- v3: the index holds the text split by cjk::index_text (CJK runs as
 -- overlapping two-character pieces), written from Rust; the stored body above
@@ -142,6 +143,9 @@ pub struct FileRecord {
     /// rather than the name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// The snippet's text was read by OCR (a scanned PDF, an image).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ocr: bool,
 }
 
 impl FileRecord {
@@ -153,6 +157,7 @@ impl FileRecord {
             id: r.get(0)?,
             offline: crate::config::volume_offline(Path::new(&path)),
             snippet: None,
+            ocr: false,
             path,
             name: r.get(2)?,
             parent: r.get(3)?,
@@ -458,6 +463,13 @@ impl Index {
             .exists([])?;
         if !has_cloud {
             conn.execute_batch("ALTER TABLE files ADD COLUMN cloud INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        // v0.8.3: content.ocr (text read by OCR, labelled "in image").
+        let has_ocr: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('content') WHERE name = 'ocr'")?
+            .exists([])?;
+        if !has_ocr {
+            conn.execute_batch("ALTER TABLE content ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0;")?;
         }
         // Only write when something changed: a write waits for any other
         // connection's transaction (a scan still finishing in a Lumen that is

@@ -297,10 +297,10 @@ async function viewTimeline(v) {
   for (const m of months) {
     const y = m.month.slice(0, 4)
     if (y !== year) { year = y; tl.append(h(`<div class="tl-year"><span>${T.tl_year(y)}</span><b>${T.files(fmt(months.filter(x => x.month.startsWith(y)).reduce((a, x) => a + x.files, 0)))}</b></div>`)) }
-    const total = m.kinds.reduce((a, k) => a + k.files, 0) || 1
+    const top = m.kinds.slice(0, 4), total = top.reduce((a, k) => a + k.files, 0) || 1
     const r = h(`<button class="tl-row" style="animation-delay:${Math.min(i++, 20) * 22}ms"><i class="dot"></i>
       <div class="tl-m">${T.tl_month(m.month)}</div>
-      <div class="tl-bar"><div class="tl-fill" data-w="${(Math.max(m.files / max, 0.02) * 100).toFixed(1)}">${m.kinds.map(k => `<b style="--c:${kc(k.kind)};flex:${k.files / total}"></b>`).join('')}</div></div>
+      <div class="tl-bar"><div class="tl-fill" data-w="${(Math.max(m.files / max, 0.02) * 100).toFixed(1)}">${top.map(k => `<b style="--c:${kc(k.kind)};flex:${k.files / total}"></b>`).join('')}</div></div>
       <div class="tl-kinds">${m.kinds.slice(0, 3).map(k => `<span style="--c:${kc(k.kind)}"><i></i>${T.kind[k.kind]} ${fmt(k.files)}</span>`).join('')}</div>
       <div class="tl-n">${fmt(m.files)}</div><div class="tl-s">${bytes(m.bytes)}</div></button>`)
     r.onclick = () => { state.month = m.month; state.monthKind = null; render() }
@@ -820,7 +820,9 @@ function scanningStage() {
   radar = new Radar($('canvas', el))
 }
 function onProgress(p) {
-  state.scanning = true
+  // A scan the UI did not start (a drive, a queued rescan), or one a stale
+  // snapshot said had ended: progress was counted but the spinner stayed off.
+  if (!state.scanning) { state.scanning = true; setLive(state.snapshot) }
   if ($('#stage').hidden) { $('#live-sub').textContent = `${T.live_scanning} ${fmt(p.files_found)}`; return }
   const n = $('#sc-n'); if (!n) return
   n.textContent = fmt(p.files_found)
