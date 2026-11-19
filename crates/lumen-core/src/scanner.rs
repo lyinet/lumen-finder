@@ -54,6 +54,9 @@ struct Counters {
     files: AtomicU64,
     bytes: AtomicU64,
     current: Mutex<String>,
+    /// Folders the walk could not read (permission denied): their files are
+    /// unseen, not gone.
+    denied: Mutex<Vec<PathBuf>>,
 }
 
 /// Scan every root in `cfg`. Safe to call on an existing index: that is the
@@ -112,9 +115,12 @@ pub fn scan(
     let mut removed = 0i64;
     if !cancelled {
         // Files not stamped this generation are gone, except under roots that
-        // are configured but not mounted right now (an unplugged drive): those
-        // are kept and shown as offline.
-        let offline: Vec<PathBuf> = cfg.roots.iter().filter(|r| !r.is_dir()).cloned().collect();
+        // are configured but not reachable right now (an unplugged drive, a
+        // link to one): those are kept and shown as offline. A root that was
+        // deleted is not offline: before, its files stayed in search forever.
+        let mut offline: Vec<PathBuf> = cfg.roots.iter().filter(|r| root_offline(r)).cloned().collect();
+        // Folders the walk was not allowed into keep what they had.
+        offline.extend(counters.denied.lock().map(|d| d.clone()).unwrap_or_default());
         let tx = writer.transaction()?;
         let has_volume_rows: bool = tx
             .query_row("SELECT 1 FROM files WHERE seen_gen < ?1 AND path LIKE '/Volumes/%' LIMIT 1", [gen], |_| Ok(true))
@@ -167,6 +173,37 @@ pub fn scan(
         dirs: counters.dirs.load(Ordering::Relaxed),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// A configured root that is missing but may come back: on a drive that is
+/// not mounted, or still present as an entry (a link to an unplugged drive,
+/// a folder Lumen may not look at). Only a root that no longer exists at all
+/// on a mounted disk is gone.
+fn root_offline(root: &Path) -> bool {
+    if root.is_dir() {
+        return false;
+    }
+    if crate::config::volume_offline(root) {
+        return true;
+    }
+    !matches!(std::fs::symlink_metadata(root), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The folder behind a walk error, when the error is "not allowed to read it".
+fn denied_dir(e: &ignore::Error) -> Option<PathBuf> {
+    let mut path = None;
+    let mut cur = e;
+    loop {
+        match cur {
+            ignore::Error::WithPath { path: p, err } => {
+                path.get_or_insert_with(|| p.clone());
+                cur = err;
+            }
+            ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => cur = err,
+            ignore::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => return path,
+            _ => return None,
+        }
+    }
 }
 
 fn snapshot(c: &Counters, phase: ScanPhase, started: Instant) -> ScanProgress {
@@ -234,7 +271,17 @@ fn walk_parallel(
             if cancel.load(Ordering::Relaxed) {
                 return WalkState::Quit;
             }
-            let Ok(entry) = res else { return WalkState::Continue };
+            let entry = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    if let Some(dir) = denied_dir(&e) {
+                        if let Ok(mut d) = counters.denied.lock() {
+                            d.push(dir);
+                        }
+                    }
+                    return WalkState::Continue;
+                }
+            };
             let Some(ft) = entry.file_type() else { return WalkState::Continue };
             if ft.is_dir() {
                 counters.dirs.fetch_add(1, Ordering::Relaxed);
@@ -312,6 +359,13 @@ pub(crate) fn apply_paths(
         if !filter.allow_path_chain(p, roots) {
             continue;
         }
+        // The root itself is unreachable: a drive was ejected (or a link to
+        // one). Removing its files here wiped an unplugged drive from the
+        // index, which a scan keeps as offline. A root that was deleted
+        // outright still has its files removed.
+        if roots.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).is_some_and(|r| root_offline(r)) {
+            continue;
+        }
         match std::fs::symlink_metadata(p) {
             Ok(meta) if meta.is_dir() => {
                 if filter.allow_dir(p) {
@@ -325,6 +379,11 @@ pub(crate) fn apply_paths(
                             write_batch(conn, std::slice::from_ref(&f), gen)?;
                             upserted += 1;
                         }
+                    } else {
+                        // Emptied (or shrunk under the size floor): a full scan
+                        // would drop it, so the live update does too, rather
+                        // than keep showing its old size until then.
+                        removed += remove_tree(conn, &p.to_string_lossy())?;
                     }
                 }
             }
@@ -370,5 +429,52 @@ mod tests {
         // A path that is really gone is still removed.
         std::fs::remove_file(&file).unwrap();
         assert_eq!(apply_paths(&mut conn, &[file], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
+    }
+
+    #[test]
+    fn root_that_went_away_is_left_to_the_rescan() {
+        // An ejected drive's root disappears and the watcher hears about it:
+        // its files used to be deleted from the index on the spot, though a
+        // scan keeps an unplugged drive's files as offline.
+        let dir = tempfile::tempdir().unwrap();
+        // (/Volumes cannot be made here; a root that links to the drive is
+        // the same case: the entry is there, what it points at is not.)
+        let target = dir.path().join("mnt/Passport");
+        std::fs::create_dir_all(target.join("Movies")).unwrap();
+        std::fs::write(target.join("Movies/trip.mp4"), b"mp4").unwrap();
+        let drive = dir.path().join("Passport");
+        std::os::unix::fs::symlink(&target, &drive).unwrap();
+        let file = drive.join("Movies/trip.mp4");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("a.pdf"), b"pdf").unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![drive.clone(), plain.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(index.file_count().unwrap(), 2);
+        let (filter, roots) = (cfg.filter(), cfg.effective_roots());
+        std::fs::rename(&target, dir.path().join("elsewhere")).unwrap(); // "unmounted"
+        let mut conn = index.writer().unwrap();
+        assert_eq!(apply_paths(&mut conn, &[drive.clone(), file.clone()], &filter, &roots).unwrap(), (0, 0));
+        assert_eq!(index.file_count().unwrap(), 2);
+        // A root folder deleted outright still loses its files.
+        std::fs::remove_dir_all(&plain).unwrap();
+        assert_eq!(apply_paths(&mut conn, std::slice::from_ref(&plain), &filter, &roots).unwrap(), (0, 1));
+    }
+
+    #[test]
+    fn emptied_file_leaves_the_index_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let file = home.join("notes.txt");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(&file, b"some notes").unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        let mut conn = index.writer().unwrap();
+        assert_eq!(apply_paths(&mut conn, &[file], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
+        assert_eq!(index.file_count().unwrap(), 0);
     }
 }

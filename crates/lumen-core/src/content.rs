@@ -338,12 +338,15 @@ fn decode(buf: &[u8]) -> String {
         // Cut mid-character by `take`: keep the valid prefix.
         Err(e) if e.error_len().is_none() => String::from_utf8_lossy(&buf[..e.valid_up_to()]).into_owned(),
         Err(_) => {
-            let (s, _, bad) = encoding_rs::GB18030.decode(buf);
-            if bad {
-                String::from_utf8_lossy(buf).into_owned()
-            } else {
-                s.into_owned()
+            // The read cap can cut the last (two- or four-byte) character in
+            // half; that alone made a whole GBK file fall back to mojibake.
+            for cut in 0..4.min(buf.len()) {
+                let (s, bad) = encoding_rs::GB18030.decode_without_bom_handling(&buf[..buf.len() - cut]);
+                if !bad {
+                    return s.into_owned();
+                }
             }
+            String::from_utf8_lossy(buf).into_owned()
         }
     }
 }
@@ -477,9 +480,12 @@ pub(crate) fn strip_rtf(s: &str) -> String {
     let mut depth = 0i32;
     let mut skip_depth: Option<i32> = None;
     let mut pending_bytes: Vec<u8> = Vec::new();
+    // \'hh bytes are in the document's code page. Always reading them as
+    // GB18030 turned TextEdit's \'e9 (é, code page 1252) into nothing.
+    let enc = rtf_encoding(s);
     let flush = |pb: &mut Vec<u8>, out: &mut String| {
         if !pb.is_empty() {
-            let (t, _, _) = encoding_rs::GB18030.decode(pb);
+            let (t, _) = enc.decode_without_bom_handling(pb);
             out.push_str(&t);
             pb.clear();
         }
@@ -575,6 +581,49 @@ pub(crate) fn strip_rtf(s: &str) -> String {
     }
     flush(&mut pending_bytes, &mut out);
     out
+}
+
+/// The code page of an RTF file's \'hh bytes: `\ansicpgN`, or a Chinese,
+/// Japanese or Korean font charset when the document uses one. GB18030 when
+/// nothing says otherwise (Lumen's long-standing default).
+fn rtf_encoding(s: &str) -> &'static encoding_rs::Encoding {
+    use encoding_rs::*;
+    let mut end = s.len().min(64 * 1024);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &s[..end];
+    let num_after = |key: &str| -> Option<u32> {
+        let i = head.find(key)? + key.len();
+        let digits: String = head[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    // A CJK font in the font table: its bytes are in that script's code page
+    // even when \ansicpg says 1252 (Word writes both).
+    for (cs, enc) in [("\\fcharset134", GB18030), ("\\fcharset136", BIG5), ("\\fcharset128", SHIFT_JIS), ("\\fcharset129", EUC_KR)] {
+        if head.contains(cs) {
+            return enc;
+        }
+    }
+    match num_after("\\ansicpg") {
+        Some(936 | 54936 | 20936) => GB18030,
+        Some(950) => BIG5,
+        Some(932) => SHIFT_JIS,
+        Some(949) => EUC_KR,
+        Some(874) => WINDOWS_874,
+        Some(1250) => WINDOWS_1250,
+        Some(1251) => WINDOWS_1251,
+        Some(1252) => WINDOWS_1252,
+        Some(1253) => WINDOWS_1253,
+        Some(1254) => WINDOWS_1254,
+        Some(1255) => WINDOWS_1255,
+        Some(1256) => WINDOWS_1256,
+        Some(1257) => WINDOWS_1257,
+        Some(1258) => WINDOWS_1258,
+        Some(10000) => MACINTOSH,
+        _ if head.contains("\\mac") && !head.contains("\\ansi") => MACINTOSH,
+        _ => GB18030,
+    }
 }
 
 /// Collapse runs of whitespace, drop control characters, cap the length.

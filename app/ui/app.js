@@ -428,8 +428,9 @@ async function viewDupes(v) {
   v.append(h(`<div class="head"><div><h1>${T.dupes_title}</h1><p>${T.dupes_sub}</p></div><div class="s" id="dupe-total"></div></div>`))
   const sc = h(`<div class="scroll"><div class="empty" style="padding:60px"><div><div class="orb"></div><div class="big">${T.dupes_loading}</div></div></div></div>`); v.append(sc)
   bindRows(sc)
-  const groups = await api.duplicates()
-  if (state.view !== 'dupes') return
+  const r = v.dataset.r, groups = await api.duplicates()
+  // Left (or left and came back) while it loaded: the page on screen is not this one.
+  if (state.view !== 'dupes' || v.dataset.r !== r) return
   if (!groups.length) { sc.innerHTML = `<div class="empty" style="padding:60px"><div><div class="big">${T.dupes_none}</div></div></div>`; return }
   let wasted = groups.reduce((a, g) => a + g.wasted, 0)
   const keep = groups.map(() => 0)

@@ -258,3 +258,128 @@ fn semantic_cache_is_not_reused_after_reset() {
     set_embedder(None);
     assert!(hits.is_empty(), "stale vectors answered for a new file: {hits:?}");
 }
+
+// ---------------------------------------------------------------- round 2 --
+
+fn all_names(index: &Index) -> Vec<String> {
+    let mut v: Vec<String> = index
+        .conn()
+        .prepare("SELECT name FROM files ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn deleted_root_on_the_boot_volume_is_dropped() {
+    // A folder the user indexed and then deleted is not an unplugged drive:
+    // its files used to stay in search forever, all of them dead links.
+    let dir = tempfile::tempdir().unwrap();
+    let keep = dir.path().join("keep");
+    let gone = dir.path().join("gone");
+    touch(&keep.join("a.pdf"), b"a");
+    touch(&gone.join("b.pdf"), b"b");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![keep.clone(), gone.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["a.pdf", "b.pdf"]);
+    fs::remove_dir_all(&gone).unwrap();
+    let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["a.pdf"]);
+    assert_eq!(r.removed, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_folder_keeps_its_files_on_rescan() {
+    // Same rule as the watcher: a folder Lumen lost access to (privacy
+    // settings, chmod) is not a folder whose files were deleted.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("open/a.pdf"), b"a");
+    touch(&home.join("locked/b.pdf"), b"b");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["a.pdf", "b.pdf"]);
+    let locked = home.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::read_dir(&locked).is_err();
+    let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {});
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    if !denied {
+        return; // root: permissions are not enforced
+    }
+    r.unwrap();
+    assert_eq!(all_names(&index), vec!["a.pdf", "b.pdf"]);
+    // Really deleted files next to it still go.
+    fs::remove_file(home.join("open/a.pdf")).unwrap();
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["b.pdf"]);
+}
+
+#[test]
+fn big_gb18030_text_cut_mid_character_still_reads() {
+    // Text files are read up to a byte cap. A GBK/GB18030 novel cut in the
+    // middle of a two-byte character failed to decode and was indexed as
+    // UTF-8 mojibake: no Chinese word in it could be found.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("novel.txt");
+    let text = "第一章 北海道的雪景。".repeat(60_000);
+    let (bytes, _, _) = encoding_rs::GB18030.encode(&text);
+    // Put the cap in the middle of a character, whatever the cap is.
+    let mut bytes = bytes.into_owned();
+    bytes.splice(0..0, *b"xx");
+    // 2 + 21-byte lines: the 480,000-byte read cap lands on a character's first byte.
+    touch(&p, &bytes);
+    let t = content::extract(&p, "txt").unwrap().unwrap();
+    assert!(t.contains("北海道的雪景"), "{}", &t[..60.min(t.len())]);
+}
+
+#[test]
+fn rtf_in_a_western_code_page_keeps_accents() {
+    // TextEdit writes é as \'e9 under \ansicpg1252; it was decoded as
+    // GB18030 and the word was lost.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("menu.rtf");
+    touch(&p, br"{\rtf1\ansi\ansicpg1252\cocoartf2761{\fonttbl\f0\fswiss Helvetica;}\f0 Caf\'e9 cr\'e8me br\'fbl\'e9e}");
+    assert_eq!(content::extract(&p, "rtf").unwrap().as_deref(), Some("Café crème brûlée"));
+    // Chinese Windows RTF still reads as GB18030.
+    let (gb, _, _) = encoding_rs::GB18030.encode("合同");
+    let hex: String = gb.iter().map(|b| format!("\\'{b:02x}")).collect();
+    touch(&p, format!(r"{{\rtf1\ansi\ansicpg936 {hex}}}").as_bytes());
+    assert_eq!(content::extract(&p, "rtf").unwrap().as_deref(), Some("合同"));
+}
+
+#[test]
+fn semantic_cache_drops_a_deleted_files_vector() {
+    // Deleting a file deletes its vector (a trigger) without a new vector
+    // revision; the next file inserted can reuse the row id, and the cached
+    // vector then answered for it.
+    let _g = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    set_embedder(Some(Arc::new(SnowEmbedder)));
+    index.insert_files(&[nf("/u/a/budget.xlsx", Kind::Spreadsheet, 10, 1_600_000_000)]).unwrap();
+    index.insert_files(&[nf("/u/a/snow day.mov", Kind::Video, 10, 1_700_000_000)]).unwrap();
+    index_semantic(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    let top = |idx: &Index| {
+        semantic_search(idx, &SemanticRequest { query: "snow".into(), ..Default::default() })
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|h| h.file.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(top(&index), vec!["snow day.mov"]);
+    index.remove_path("/u/a/snow day.mov").unwrap();
+    index.insert_files(&[nf("/u/a/taxes.pdf", Kind::Pdf, 10, 1_700_000_000)]).unwrap();
+    let hits = top(&index);
+    set_embedder(None);
+    assert!(hits.is_empty(), "a deleted file's vector answered for another: {hits:?}");
+}
