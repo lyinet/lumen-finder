@@ -479,8 +479,24 @@ fn save_share_card(png: Vec<u8>) -> Res<String> {
     let desk = Path::new(&home).join("Desktop");
     let dir = if desk.is_dir() { desk } else { PathBuf::from(&home) };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path = dir.join(format!("Lumen-{stamp}.png"));
-    std::fs::write(&path, png).map_err(err)?;
+    // Never over an earlier card: two saves in the same second used to
+    // share a name, and the second silently replaced the first.
+    let mut n = 0;
+    let path = loop {
+        let p = dir.join(if n == 0 { format!("Lumen-{stamp}.png") } else { format!("Lumen-{stamp}-{n}.png") });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(&png) {
+                    let _ = std::fs::remove_file(&p);
+                    return Err(err(e));
+                }
+                break p;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(e) => return Err(err(e)),
+        }
+    };
     let _ = Command::new("open").arg("-R").arg(&path).spawn();
     Ok(path.to_string_lossy().into_owned())
 }

@@ -9,6 +9,12 @@ export const isApp = !!tauri
 function realBridge() {
   const { invoke } = tauri.core
   const { listen } = tauri.event
+  // Listen as this window: a bare `listen` targets Any, and Tauri hands an
+  // Any listener every event, `emit_to` another window's label included, so
+  // the panel and the main window both ran each other's app://query.
+  const label = tauri.webviewWindow?.getCurrentWebviewWindow?.()?.label
+    ?? window.__TAURI_INTERNALS__?.metadata?.currentWebview?.label
+  const opts = label ? { target: label } : undefined
   return {
     snapshot: () => invoke('snapshot'),
     search: req => invoke('search', { req }),
@@ -49,7 +55,7 @@ function realBridge() {
     showInMain: query => invoke('show_in_main', { query }),
     takeLink: () => invoke('take_link'),
     pickFolder: async () => tauri.dialog ? tauri.dialog.open({ directory: true, multiple: false }) : null,
-    on: (event, cb) => listen(event, e => cb(e.payload)),
+    on: (event, cb) => listen(event, e => cb(e.payload), opts),
   }
 }
 

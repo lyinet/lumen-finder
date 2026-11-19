@@ -132,19 +132,46 @@ impl Index {
                 let v = stmt.query_map([size], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.flatten().collect();
                 v
             };
-            let mut by_hash: std::collections::HashMap<String, Vec<i64>> = Default::default();
+            // The cached value is the sampled fingerprint, followed by
+            // ":<full hash>" once the file has matched another one's samples.
+            let mut by_sample: std::collections::HashMap<String, Vec<(i64, String, Option<String>)>> = Default::default();
             for (id, path, hash) in cands {
-                let h = match hash {
-                    Some(h) => h,
+                let (sample, full) = match hash.as_deref().map(|h| h.split_once(':').unwrap_or((h, ""))) {
+                    Some((s, f)) => (s.to_string(), (!f.is_empty()).then(|| f.to_string())),
                     None => match fingerprint(&path, size as u64) {
                         Ok(h) => {
                             self.conn().execute("UPDATE files SET hash = ?1 WHERE id = ?2", params![h, id])?;
-                            h
+                            (h, None)
                         }
                         Err(_) => continue, // unreadable or gone; skip
                     },
                 };
-                by_hash.entry(h).or_default().push(id);
+                by_sample.entry(sample).or_default().push((id, path, full));
+            }
+            // Samples only cover head, middle and tail: files that agree on
+            // them are compared in full before they count as copies (two disk
+            // images or recordings the same size often agree there).
+            let mut by_hash: std::collections::HashMap<String, Vec<i64>> = Default::default();
+            for (sample, members) in by_sample.into_iter().filter(|(_, v)| v.len() > 1) {
+                for (id, path, full) in members {
+                    let h = if size as u64 <= SAMPLE * 3 {
+                        sample.clone() // the sample was the whole file
+                    } else if let Some(f) = full {
+                        f
+                    } else {
+                        match full_hash(&path) {
+                            Ok(f) => {
+                                self.conn().execute(
+                                    "UPDATE files SET hash = ?1 WHERE id = ?2",
+                                    params![format!("{sample}:{f}"), id],
+                                )?;
+                                f
+                            }
+                            Err(_) => continue,
+                        }
+                    };
+                    by_hash.entry(h).or_default().push(id);
+                }
             }
             for ids in by_hash.into_values().filter(|v| v.len() > 1) {
                 let files: Vec<FileRecord> = ids.iter().filter_map(|id| self.get(*id).ok().flatten()).collect();
@@ -167,6 +194,13 @@ impl Index {
 }
 
 const SAMPLE: u64 = 256 * 1024;
+
+fn full_hash(path: &str) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = blake3::Hasher::new();
+    std::io::copy(&mut f, &mut h)?;
+    Ok(h.finalize().to_hex()[..32].to_string())
+}
 
 fn fingerprint(path: &str, size: u64) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;

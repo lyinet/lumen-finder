@@ -63,7 +63,10 @@ impl DriveWatch {
     /// `path` is an event's path: a drive mounted or ejected shows up as an
     /// event on /Volumes/<name>.
     pub(crate) fn matters(&self, path: &std::path::Path) -> bool {
-        path.parent() == Some(std::path::Path::new(crate::config::VOLUMES)) && (self.all || self.drives.iter().any(|d| d == path))
+        // Compared by precomposed form, as macOS compares names: the root's
+        // drive name and the event's may be spelled in different forms.
+        let same = |d: &PathBuf| d == path || matches!((d.to_str(), path.to_str()), (Some(a), Some(b)) if crate::nfc(a) == crate::nfc(b));
+        path.parent() == Some(std::path::Path::new(crate::config::VOLUMES)) && (self.all || self.drives.iter().any(same))
     }
 }
 
@@ -186,5 +189,13 @@ mod tests {
         assert!(!DriveWatch::new(&cfg).any());
         let cfg = Config { roots: vec![PathBuf::from("/Users/a")], include_external: true, ..Config::default() };
         assert!(DriveWatch::new(&cfg).matters(Path::new("/Volumes/Other")));
+    }
+
+    #[test]
+    fn drive_name_matches_in_either_unicode_form() {
+        // The folder picker hands back one spelling of "Données", FSEvents
+        // reports the mount in the other.
+        let cfg = Config { roots: vec![PathBuf::from("/Volumes/Donne\u{301}es/Photos")], include_external: false, ..Config::default() };
+        assert!(DriveWatch::new(&cfg).matters(Path::new("/Volumes/Donn\u{e9}es")));
     }
 }

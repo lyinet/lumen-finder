@@ -591,3 +591,34 @@ fn offline_drive_root_kept_in_settings_and_index() {
     assert!(r.hits[0].offline);
     assert_eq!(names(&index, "a.txt"), vec!["a.txt"]);
 }
+
+/// Two big files the same size whose head, middle and tail agree but which
+/// differ elsewhere (disk images, raw video, databases) were shown as
+/// duplicates, one click away from "Trash all copies".
+#[test]
+fn same_samples_different_content_are_not_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let size = 4 * 256 * 1024;
+    let a = vec![7u8; size];
+    let mut b = a.clone();
+    b[300 * 1024] = 8; // outside every sampled window
+    let mut c = a.clone();
+    c[size / 2] = 9; // inside the middle window
+    let (pa, pb, pc, pd) = (dir.path().join("a.img"), dir.path().join("b.img"), dir.path().join("c.img"), dir.path().join("d.img"));
+    touch(&pa, &a);
+    touch(&pb, &b);
+    touch(&pc, &c);
+    touch(&pd, &a);
+    let files: Vec<NewFile> =
+        [&pa, &pb, &pc, &pd].iter().map(|p| nf(p.to_str().unwrap(), Kind::Archive, size as i64, 1_700_000_000)).collect();
+    index.insert_files(&files).unwrap();
+    for _ in 0..2 {
+        // (twice: the second run reads the cached fingerprints)
+        let groups = index.duplicates(1024, 10).unwrap();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        let mut got: Vec<String> = groups[0].files.iter().map(|f| f.name.clone()).collect();
+        got.sort();
+        assert_eq!(got, ["a.img", "d.img"]);
+    }
+}
