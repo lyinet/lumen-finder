@@ -368,8 +368,26 @@ pub(crate) fn index_tree(conn: &mut rusqlite::Connection, dir: &Path, filter: &P
     let n = files.len();
     for chunk in files.chunks(BATCH) {
         write_batch(conn, chunk, gen)?;
+        mark_touched(conn, chunk)?;
     }
     Ok(n)
+}
+
+/// Remember (on this connection only) which rows a live update just wrote,
+/// so the watcher reads their words even when their mtime is old: a document
+/// moved or renamed gets a new row, and its text used to stay unread (out of
+/// content search) until the next full pass, since the watcher only reads
+/// files saved in the last hour.
+pub(crate) const TOUCHED: &str = "CREATE TEMP TABLE IF NOT EXISTS lumen_touched (id INTEGER PRIMARY KEY)";
+
+fn mark_touched(conn: &rusqlite::Connection, files: &[NewFile]) -> Result<()> {
+    conn.execute_batch(TOUCHED)?;
+    let mut stmt =
+        conn.prepare_cached("INSERT OR IGNORE INTO temp.lumen_touched(id) SELECT id FROM files WHERE path = ?1")?;
+    for f in files {
+        stmt.execute([&f.path])?;
+    }
+    Ok(())
 }
 
 /// Apply a set of changed paths reported by the file system.
@@ -403,6 +421,7 @@ pub(crate) fn apply_paths(
                     if filter.keep_size(p, &meta) {
                         if let Some(f) = NewFile::from_path(p, kind, &meta) {
                             write_batch(conn, std::slice::from_ref(&f), gen)?;
+                            mark_touched(conn, std::slice::from_ref(&f))?;
                             upserted += 1;
                         }
                     } else {

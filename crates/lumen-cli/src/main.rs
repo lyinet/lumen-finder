@@ -23,7 +23,9 @@ use std::sync::Arc;
 const USAGE: &str = "lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]";
 
 fn main() -> Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Not `env::args()`: it panics on an argument that is not UTF-8 (a pasted
+    // byte, a name from another system). macOS file names are UTF-8.
+    let mut args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let alfred = take_flag(&mut args, "--alfred");
     let json = take_flag(&mut args, "--json") && !alfred;
     let r = run(args, json, alfred);
@@ -44,8 +46,14 @@ fn run(mut args: Vec<String>, json: bool, alfred: bool) -> Result<()> {
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
     if !matches!(cmd.as_str(), "scan" | "content" | "search" | "s" | "ask" | "stats" | "dupes") {
         // Help needs no index (and must not create an empty one).
-        println!("{USAGE}");
-        return Ok(());
+        if matches!(cmd.as_str(), "help" | "--help" | "-h") {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        // A mistyped command is an error: it used to print the usage and
+        // exit 0, so a script never noticed nothing ran.
+        eprintln!("lumen: unknown command “{cmd}”\n{USAGE}");
+        std::process::exit(2);
     }
     let index = Index::open(&db)?;
     set_embed_helper(Some(helper_path()));
@@ -54,7 +62,18 @@ fn run(mut args: Vec<String>, json: bool, alfred: bool) -> Result<()> {
         "scan" => {
             let mut cfg = Config::load(&config_path());
             if !args.is_empty() {
-                cfg.roots = args.iter().map(PathBuf::from).collect();
+                // Full paths, and only folders that exist: "." stored rows
+                // like "./notes.txt" the app could not open, and a mistyped
+                // folder scanned nothing and then removed every file of the
+                // index (it shares the app's) as gone.
+                cfg.roots = args
+                    .iter()
+                    .map(|a| {
+                        let p = full_path(a)?;
+                        anyhow::ensure!(p.is_dir(), "no such folder: {a}");
+                        Ok(p)
+                    })
+                    .collect::<Result<_>>()?;
             }
             let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |p| {
                 if !json {
@@ -249,6 +268,23 @@ fn tilde(path: &str, home: &str) -> String {
     }
 }
 
+/// An absolute path with "." and ".." worked out, as the app stores paths
+/// ("Docs/../Docs" was stored as written: a second copy of every file).
+fn full_path(a: &str) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in std::path::absolute(a)?.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    Ok(out)
+}
+
 fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("app.lumen.desktop")
 }
@@ -295,6 +331,14 @@ mod tests {
         assert_eq!(tilde("/Users/ab/x", "/Users/a"), "/Users/ab/x");
         assert_eq!(tilde("/Volumes/Users/a/x", "/Users/a"), "/Volumes/Users/a/x");
         assert_eq!(tilde("/Users/a/x", ""), "/Users/a/x");
+    }
+
+    #[test]
+    fn roots_are_full_and_tidy() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(full_path(".").unwrap(), cwd);
+        assert_eq!(full_path("a/../b/./c/").unwrap(), cwd.join("b/c"));
+        assert_eq!(full_path("/x/../y").unwrap(), PathBuf::from("/y"));
     }
 
     #[test]

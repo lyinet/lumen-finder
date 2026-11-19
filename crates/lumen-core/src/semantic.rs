@@ -371,7 +371,14 @@ pub fn index_semantic(
             let mut put = tx.prepare_cached(
                 "INSERT OR REPLACE INTO vectors(id, mtime, size, model, vec) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
+            // Embedding a batch takes a while: the file may have left the
+            // index meanwhile, and its id may now be another file's (ids
+            // restart after a reset; the highest is reused after a delete).
+            let mut same = tx.prepare_cached("SELECT 1 FROM files WHERE id = ?1 AND name = ?2 AND parent = ?3")?;
             for ((job, (model, _)), v) in chunk.iter().zip(&items).zip(vecs) {
+                if !same.exists(params![job.0, job.3, job.4])? {
+                    continue;
+                }
                 // A file with no vector still gets a row (empty blob) so it is
                 // not retried on every pass.
                 let blob = match v.and_then(|mut v| normalize(&mut v).then_some(v)) {

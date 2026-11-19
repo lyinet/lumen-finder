@@ -38,6 +38,8 @@ pub const OCR_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic", "heif", "tif", "ti
 /// Images smaller than this are icons and thumbnails, larger are rarely text.
 const OCR_MIN_BYTES: i64 = 20 * 1024;
 const OCR_MAX_BYTES: i64 = 40 * 1024 * 1024;
+/// Most documents one watcher batch reads; the rest wait for the next pass.
+const WATCHER_MAX_JOBS: usize = 500;
 /// A PDF with fewer characters than this in its text layer is a scan.
 const SCANNED_PDF_CHARS: usize = 40;
 
@@ -160,7 +162,19 @@ pub(crate) fn index_pending(
     };
     // The watcher reads only what was just saved; the rest of the queue is
     // the background pass's, which may be holding for power.
-    let recent = if paced { String::new() } else { format!("AND f.mtime >= {}", crate::index::now() - 3600) };
+    // Rows the watcher just wrote count as recent whatever their mtime (a
+    // document moved into another folder keeps its old date but is a new
+    // row with no words yet). Capped: a big folder moved in is mostly the
+    // background pass's.
+    let (recent, limit) = if paced {
+        (String::new(), String::new())
+    } else {
+        conn.execute_batch(crate::scanner::TOUCHED)?;
+        (
+            format!("AND (f.mtime >= {} OR f.id IN (SELECT id FROM temp.lumen_touched))", crate::index::now() - 3600),
+            format!("LIMIT {WATCHER_MAX_JOBS}"),
+        )
+    };
     let jobs: Vec<Job> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT f.id, f.path, f.ext, f.size, f.mtime FROM files f
@@ -168,13 +182,18 @@ pub(crate) fn index_pending(
              WHERE ((f.ext IN ({marks}) AND f.size <= ?1) {images})
                AND f.cloud = 0 {recent}
                AND (c.id IS NULL OR c.mtime <> f.mtime OR c.size <> f.size)
-             ORDER BY f.ext IN ({ocr_marks}), f.mtime DESC"
+             ORDER BY f.ext IN ({ocr_marks}), f.mtime DESC {limit}"
         ))?;
         let rows = stmt.query_map([MAX_FILE_BYTES], |r| {
             Ok(Job { id: r.get(0)?, path: r.get(1)?, ext: r.get(2)?, size: r.get(3)?, mtime: r.get(4)? })
         })?;
         rows.filter_map(|r| r.ok()).collect()
     };
+    if !paced {
+        // Picked up (or left to the background pass): either way not this
+        // watcher's to read again next batch.
+        conn.execute("DELETE FROM temp.lumen_touched", [])?;
+    }
     let total = jobs.len() as u64;
     let mut report = ContentReport { read: 0, with_text: 0, failed: 0, elapsed_ms: 0, cancelled: false };
     if jobs.is_empty() {
@@ -274,9 +293,11 @@ fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool)]) -> Result
         let mut fts_del = tx.prepare_cached("DELETE FROM content_fts WHERE rowid = ?1")?;
         let mut fts_ins = tx.prepare_cached("INSERT INTO content_fts(rowid, toks) VALUES (?1, ?2)")?;
         for (job, text, _) in items {
-            // The file may have left the index while it was being read.
+            // The file may have left the index while it was being read, and
+            // its id may since belong to another file (ids restart after a
+            // reset and the highest one is reused after a delete).
             let exists: bool = tx
-                .query_row("SELECT 1 FROM files WHERE id = ?1", [job.id], |_| Ok(true))
+                .query_row("SELECT 1 FROM files WHERE id = ?1 AND path = ?2", params![job.id, job.path], |_| Ok(true))
                 .unwrap_or(false);
             if exists {
                 let body = text.as_deref().unwrap_or("");
@@ -796,6 +817,37 @@ pub fn snippet(body: &str, terms: &[String], radius: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_read_before_a_reset_never_lands_on_a_new_file_with_the_same_id() {
+        // A reading pass (or a watcher that did not stop in time) holds text
+        // it read for row 1; meanwhile the index is reset and scanned again,
+        // and row 1 is now another file. Its words used to be written there.
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path().join("i.db")).unwrap();
+        let mk = |p: &str| crate::index::NewFile {
+            path: p.into(),
+            name: Path::new(p).file_name().unwrap().to_string_lossy().into(),
+            name_py: String::new(),
+            parent: "/h".into(),
+            ext: "txt".into(),
+            kind: crate::Kind::Document,
+            size: 5,
+            mtime: 100,
+            ctime: 100,
+            cloud: false,
+        };
+        index.insert_files(&[mk("/h/old.txt")]).unwrap();
+        let id: i64 = index.conn().query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        let job = Job { id, path: "/h/old.txt".into(), ext: "txt".into(), size: 5, mtime: 100 };
+        index.reset().unwrap();
+        index.insert_files(&[mk("/h/new.txt")]).unwrap();
+        let id2: i64 = index.conn().query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(id, id2, "ids restart after a reset");
+        let mut conn = index.writer().unwrap();
+        write(&mut conn, &[(job, Some("secret words".into()), false)]).unwrap();
+        assert_eq!(index.content(id2).unwrap().unwrap_or_default(), "");
+    }
 
     #[test]
     fn markup_and_entities() {
