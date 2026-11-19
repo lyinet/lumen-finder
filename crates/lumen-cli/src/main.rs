@@ -20,12 +20,33 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+const USAGE: &str = "lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]";
+
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let alfred = take_flag(&mut args, "--alfred");
     let json = take_flag(&mut args, "--json") && !alfred;
+    let r = run(args, json, alfred);
+    match r {
+        // Alfred shows a Script Filter's output, never its errors: a failure
+        // (no semantic helper, an unreadable index) left an empty list.
+        Err(e) if alfred => {
+            let item = serde_json::json!({ "title": "Lumen could not search", "subtitle": format!("{e:#}"), "valid": false });
+            println!("{}", serde_json::json!({ "items": [item] }));
+            Ok(())
+        }
+        r => r,
+    }
+}
+
+fn run(mut args: Vec<String>, json: bool, alfred: bool) -> Result<()> {
     let db = take_opt(&mut args, "--db")?.map(PathBuf::from).unwrap_or_else(default_db);
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
+    if !matches!(cmd.as_str(), "scan" | "content" | "search" | "s" | "ask" | "stats" | "dupes") {
+        // Help needs no index (and must not create an empty one).
+        println!("{USAGE}");
+        return Ok(());
+    }
     let index = Index::open(&db)?;
     set_embed_helper(Some(helper_path()));
 
@@ -41,7 +62,15 @@ fn main() -> Result<()> {
                 }
             })?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&r)?);
+                // One JSON document: the scan report, with the reading pass
+                // under "content" when there was one. Two documents in a row
+                // were not parseable as JSON.
+                let mut out = serde_json::to_value(&r)?;
+                if cfg.content_search && !r.cancelled {
+                    out["content"] = serde_json::to_value(read_content(&index, true)?)?;
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
             } else {
                 eprintln!();
                 println!(
@@ -59,7 +88,12 @@ fn main() -> Result<()> {
                 read_content(&index, json)?;
             }
         }
-        "content" => read_content(&index, json)?,
+        "content" => {
+            let r = read_content(&index, json)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
         "search" | "s" => {
             let r = index.search(&SearchRequest { query: args.join(" "), limit: 30, ..Default::default() })?;
             if alfred {
@@ -85,12 +119,15 @@ fn main() -> Result<()> {
         }
         "ask" => {
             anyhow::ensure!(lumen_core::semantic::available(), "semantic search needs Lumen.app (set LUMEN_HELPER to lumen-ocr)");
-            let r = index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
+            let mut shown = false;
+            index_semantic(&index, Arc::new(AtomicBool::new(false)), |p| {
                 if !json && !alfred && !p.finished && p.total > 0 {
                     eprint!("\r\x1b[2K  learning {}/{} files", p.done, p.total);
+                    shown = true;
                 }
             })?;
-            if !json && !alfred && r.embedded > 0 {
+            // End the progress line even when nothing could be embedded.
+            if shown {
                 eprintln!();
             }
             let r = semantic_search(&index, &SemanticRequest { query: args.join(" "), limit: 20, ..Default::default() })?;
@@ -130,26 +167,23 @@ fn main() -> Result<()> {
                 }
             }
         }
-        _ => {
-            println!("lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]");
-        }
+        _ => println!("{USAGE}"),
     }
     Ok(())
 }
 
-fn read_content(index: &Index, json: bool) -> Result<()> {
+/// Read documents; prints the summary line unless `json` (the caller prints).
+fn read_content(index: &Index, json: bool) -> Result<ContentReport> {
     let r = index_content(index, Arc::new(AtomicBool::new(false)), |p| {
         if !json && !p.finished {
             eprint!("\r\x1b[2K  reading {}/{} documents", p.done, p.total);
         }
     })?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&r)?);
-    } else {
+    if !json {
         eprintln!();
         println!("Read {} documents ({} with text, {} unreadable) in {:.2}s", r.read, r.with_text, r.failed, r.elapsed_ms as f64 / 1000.0);
     }
-    Ok(())
+    Ok(r)
 }
 
 /// Alfred Script Filter: one item per file, ↵ opens it, ⌘↵ reveals it

@@ -383,3 +383,116 @@ fn semantic_cache_drops_a_deleted_files_vector() {
     set_embedder(None);
     assert!(hits.is_empty(), "a deleted file's vector answered for another: {hits:?}");
 }
+
+// ---------------------------------------------------------------- round 3 --
+
+#[cfg(unix)]
+#[test]
+fn rescan_next_to_a_locked_folder_still_drops_a_deleted_subfolder() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("locked/b.pdf"), b"b");
+    touch(&home.join("sub/deep/c.pdf"), b"c");
+    touch(&home.join("lockedness/d.pdf"), b"d"); // shares a prefix with "locked"
+    touch(&home.join("e.pdf"), b"e");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["b.pdf", "c.pdf", "d.pdf", "e.pdf"]);
+    let locked = home.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::read_dir(&locked).is_err();
+    fs::remove_dir_all(home.join("sub")).unwrap();
+    fs::remove_dir_all(home.join("lockedness")).unwrap();
+    fs::remove_file(home.join("e.pdf")).unwrap();
+    let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {});
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    r.unwrap();
+    // Root ignores permissions and sees the locked file too; either way
+    // everything that was really deleted is gone.
+    assert_eq!(all_names(&index), vec!["b.pdf"], "denied: {denied}");
+}
+
+#[cfg(unix)]
+#[test]
+fn folder_whose_files_cannot_be_looked_at_keeps_them() {
+    // A folder that can be listed but not entered (r--): its files' sizes
+    // cannot be read. They were dropped as deleted on the next scan, while
+    // the watcher (rightly) keeps them.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    touch(&home.join("shy/b.pdf"), b"b");
+    touch(&home.join("a.pdf"), b"a");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    let shy = home.join("shy");
+    fs::set_permissions(&shy, fs::Permissions::from_mode(0o444)).unwrap();
+    let denied = fs::metadata(shy.join("b.pdf")).is_err();
+    let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {});
+    fs::set_permissions(&shy, fs::Permissions::from_mode(0o755)).unwrap();
+    if !denied {
+        return;
+    }
+    r.unwrap();
+    assert_eq!(all_names(&index), vec!["a.pdf", "b.pdf"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn root_replaced_by_a_link_or_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let other = dir.path().join("other");
+    touch(&home.join("a.pdf"), b"a");
+    touch(&other.join("z.pdf"), b"z");
+    let index = Index::open(dir.path().join("index.db")).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    // The folder is now a link to another folder: its files are what is there.
+    fs::remove_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(&other, &home).unwrap();
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), vec!["z.pdf"]);
+    // Now a plain file: nothing that was in the folder is there any more.
+    fs::remove_file(&home).unwrap();
+    fs::write(&home, b"not a folder").unwrap();
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(all_names(&index), Vec::<String>::new());
+}
+
+#[test]
+fn utf8_text_with_one_stray_byte_is_not_read_as_gb18030() {
+    // A UTF-8 note with a single Latin-1 byte pasted in (or a cut-off
+    // sequence mid-file) failed UTF-8 and was then decoded as GB18030, which
+    // accepts most UTF-8 Chinese byte pairs: the whole file became mojibake.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("notes.txt");
+    for stray in [0x80u8, 0xA9, 0xE9] {
+        let mut bytes = "会议纪要：北海道项目预算".repeat(20).into_bytes();
+        bytes.push(b' ');
+        bytes.push(stray);
+        bytes.extend_from_slice("下周一出发".repeat(20).as_bytes());
+        touch(&p, &bytes);
+        let t = content::extract(&p, "txt").unwrap().unwrap();
+        assert!(t.contains("北海道项目预算") && t.contains("下周一出发"), "stray {stray:#x}: {}", &t[..60.min(t.len())]);
+    }
+}
+
+#[test]
+fn rtf_with_a_chinese_and_a_western_font_reads_both() {
+    // Word and TextEdit list a Chinese font in the table and write accented
+    // Latin text in a Western font next to it: every \'hh byte was decoded in
+    // the Chinese code page, so "Café" lost its é.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("mixed.rtf");
+    let (gb, _, _) = encoding_rs::GB18030.encode("合同");
+    let hex: String = gb.iter().map(|b| format!("\\'{b:02x}")).collect();
+    let rtf = format!(
+        r"{{\rtf1\ansi\ansicpg1252\deff0{{\fonttbl{{\f0\fswiss\fcharset0 Helvetica;}}{{\f1\fnil\fcharset134 PingFangSC-Regular;}}}}\f0 Caf\'e9 {{\f1 {hex}}} cr\'e8me \f1 {hex}}}"
+    );
+    touch(&p, rtf.as_bytes());
+    assert_eq!(content::extract(&p, "rtf").unwrap().as_deref(), Some("Café 合同 crème 合同"));
+}

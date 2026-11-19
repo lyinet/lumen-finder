@@ -186,7 +186,12 @@ fn root_offline(root: &Path) -> bool {
     if crate::config::volume_offline(root) {
         return true;
     }
-    !matches!(std::fs::symlink_metadata(root), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    match std::fs::symlink_metadata(root) {
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        // Replaced by a plain file: the folder is gone, not unplugged (its
+        // files used to be kept as "offline" forever).
+        Ok(m) => !m.is_file(),
+    }
 }
 
 /// The folder behind a walk error, when the error is "not allowed to read it".
@@ -203,6 +208,15 @@ fn denied_dir(e: &ignore::Error) -> Option<PathBuf> {
             ignore::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => return path,
             _ => return None,
         }
+    }
+}
+
+/// The error is "permission denied", with or without a path attached.
+fn denied_io(e: &ignore::Error) -> bool {
+    match e {
+        ignore::Error::WithPath { err, .. } | ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => denied_io(err),
+        ignore::Error::Io(io) => io.kind() == std::io::ErrorKind::PermissionDenied,
+        _ => false,
     }
 }
 
@@ -298,7 +312,19 @@ fn walk_parallel(
             }
             let path = entry.path();
             let Some(kind) = filter.classify_file(path) else { return WalkState::Continue };
-            let Ok(meta) = entry.metadata() else { return WalkState::Continue };
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    // Listed but not allowed to look at (a folder that can be
+                    // read but not entered): unseen, not deleted.
+                    if let Some(p) = denied_dir(&e).or_else(|| denied_io(&e).then(|| path.to_path_buf())) {
+                        if let Ok(mut d) = counters.denied.lock() {
+                            d.push(p);
+                        }
+                    }
+                    return WalkState::Continue;
+                }
+            };
             if !filter.keep_size(path, &meta) {
                 return WalkState::Continue;
             }

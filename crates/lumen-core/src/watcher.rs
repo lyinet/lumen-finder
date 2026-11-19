@@ -29,9 +29,17 @@ pub struct ChangeBatch {
 
 pub struct Watcher {
     stop: Arc<AtomicBool>,
+    /// Wakes the thread out of its quiet-period wait when stopping.
+    wake: crossbeam_channel::Sender<PathBuf>,
+    /// Closed (disconnected) when the thread has finished.
+    done: crossbeam_channel::Receiver<()>,
     _inner: notify::RecommendedWatcher,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+/// How long stopping waits for a batch being written before letting the
+/// thread finish on its own (it stops at the next file).
+const STOP_WAIT: Duration = Duration::from_secs(1);
 
 impl Watcher {
     pub fn start(
@@ -40,6 +48,8 @@ impl Watcher {
         on_change: impl Fn(ChangeBatch) + Send + 'static,
     ) -> Result<Watcher> {
         let (tx, rx) = crossbeam_channel::unbounded::<PathBuf>();
+        let wake = tx.clone();
+        let (done_tx, done) = crossbeam_channel::bounded::<()>(0);
         let mut inner = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
                 if ev.kind.is_access() {
@@ -66,11 +76,15 @@ impl Watcher {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let thread = std::thread::spawn(move || {
+            let _done = done_tx;
             let mut pending: HashSet<PathBuf> = HashSet::new();
             let mut first: Option<Instant> = None;
             while !stop2.load(Ordering::Relaxed) {
                 match rx.recv_timeout(QUIET) {
                     Ok(p) => {
+                        if stop2.load(Ordering::Relaxed) {
+                            break;
+                        }
                         pending.insert(p);
                         first.get_or_insert_with(Instant::now);
                         if first.map(|t| t.elapsed() < MAX_HOLD).unwrap_or(true) {
@@ -90,8 +104,10 @@ impl Watcher {
                     Ok((upserted, removed)) if upserted + removed > 0 || volumes_changed => {
                         let mut content_read = 0;
                         if content && upserted > 0 {
-                            let never = Arc::new(AtomicBool::new(false));
-                            match crate::content::index_pending(&mut conn, &never, false, |_| {}) {
+                            // Stopping the watcher stops its reading too: an
+                            // image's OCR can take a minute, and restarting
+                            // the watcher used to wait for every one of them.
+                            match crate::content::index_pending(&mut conn, &stop2, false, |_| {}) {
                                 Ok(r) => content_read = r.read,
                                 Err(e) => log::warn!("content update failed: {e}"),
                             }
@@ -103,15 +119,21 @@ impl Watcher {
                 }
             }
         });
-        Ok(Watcher { stop, _inner: inner, thread: Some(thread) })
+        Ok(Watcher { stop, wake, done, _inner: inner, thread: Some(thread) })
     }
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        let _ = self.wake.send(PathBuf::new());
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            // Never block the caller (the app's restart, a settings change)
+            // on a document still being parsed: wait briefly, then let the
+            // thread end by itself.
+            if let Err(crossbeam_channel::RecvTimeoutError::Disconnected) = self.done.recv_timeout(STOP_WAIT) {
+                let _ = t.join();
+            }
         }
     }
 }

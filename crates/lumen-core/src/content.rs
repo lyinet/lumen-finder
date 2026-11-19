@@ -58,7 +58,9 @@ fn ocr_helper() -> Option<std::path::PathBuf> {
 }
 
 /// Run the helper with a time limit; a stuck file never stalls the queue.
-fn ocr(path: &Path) -> Result<String> {
+/// `cancel` stops it at once: stopping the watcher (or a pass) used to wait
+/// for up to a minute per image being read.
+fn ocr(path: &Path, cancel: &AtomicBool) -> Result<String> {
     use std::process::{Command, Stdio};
     let Some(bin) = ocr_helper() else { return Ok(String::new()) };
     let mut cmd = Command::new(bin);
@@ -77,6 +79,11 @@ fn ocr(path: &Path) -> Result<String> {
             let buf = reader.join().unwrap_or_default();
             anyhow::ensure!(status.success(), "ocr failed");
             return Ok(String::from_utf8_lossy(&buf).into_owned());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("ocr cancelled");
         }
         if Instant::now() > deadline {
             let _ = child.kill();
@@ -194,10 +201,15 @@ pub(crate) fn index_pending(
                 if cancel.load(Ordering::Relaxed) || (paced && !crate::pace::wait(&cancel)) {
                     break;
                 }
-                let (text, failed) = match extract(Path::new(&job.path), &job.ext) {
+                let (text, failed) = match extract_cancellable(Path::new(&job.path), &job.ext, &cancel) {
                     Ok(t) => (t, false),
                     Err(_) => (None, true),
                 };
+                // Cut short: not a failure, and not "no text" either. Leave
+                // it unread so the next pass reads it whole.
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
                 if tx.send((job, text, failed)).is_err() {
                     break;
                 }
@@ -284,6 +296,11 @@ fn write(conn: &mut Connection, items: &[(Job, Option<String>, bool)]) -> Result
 
 /// The words of one file, or None when it has none Lumen can read.
 pub fn extract(path: &Path, ext: &str) -> Result<Option<String>> {
+    extract_cancellable(path, ext, &AtomicBool::new(false))
+}
+
+/// `extract`, giving up on a slow OCR read as soon as `cancel` is set.
+pub fn extract_cancellable(path: &Path, ext: &str, cancel: &AtomicBool) -> Result<Option<String>> {
     let ext = ext.to_ascii_lowercase();
     let raw = match ext.as_str() {
         "txt" | "md" | "markdown" | "org" | "rst" | "tex" | "csv" | "tsv" => read_text(path)?,
@@ -300,12 +317,12 @@ pub fn extract(path: &Path, ext: &str) -> Result<Option<String>> {
         "pdf" => {
             let t = pdf_text(path).unwrap_or_default();
             if t.trim().chars().count() < SCANNED_PDF_CHARS && ocr_helper().is_some() {
-                ocr(path)?
+                ocr(path, cancel)?
             } else {
                 t
             }
         }
-        e if OCR_EXTS.contains(&e) => ocr(path)?,
+        e if OCR_EXTS.contains(&e) => ocr(path, cancel)?,
         _ => return Ok(None),
     };
     let text = normalize(&raw);
@@ -337,6 +354,7 @@ fn decode(buf: &[u8]) -> String {
         Ok(s) => s.to_string(),
         // Cut mid-character by `take`: keep the valid prefix.
         Err(e) if e.error_len().is_none() => String::from_utf8_lossy(&buf[..e.valid_up_to()]).into_owned(),
+        Err(_) if mostly_utf8(buf) => String::from_utf8_lossy(buf).into_owned(),
         Err(_) => {
             // The read cap can cut the last (two- or four-byte) character in
             // half; that alone made a whole GBK file fall back to mojibake.
@@ -349,6 +367,21 @@ fn decode(buf: &[u8]) -> String {
             String::from_utf8_lossy(buf).into_owned()
         }
     }
+}
+
+/// UTF-8 with a few bad bytes (a pasted Latin-1 character, a damaged
+/// sequence): GB18030 accepts most UTF-8 Chinese byte pairs, so trying it
+/// first turned such a file into mojibake. Real GBK text is almost never
+/// valid UTF-8 beyond its ASCII.
+fn mostly_utf8(buf: &[u8]) -> bool {
+    let (mut wide, mut bad) = (0usize, 0usize);
+    for chunk in buf.utf8_chunks() {
+        wide += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        if !chunk.invalid().is_empty() {
+            bad += 1;
+        }
+    }
+    wide >= 4 && bad * 8 <= wide
 }
 
 fn zip_xml(path: &Path, want: impl Fn(&str) -> bool) -> Result<String> {
@@ -480,10 +513,17 @@ pub(crate) fn strip_rtf(s: &str) -> String {
     let mut depth = 0i32;
     let mut skip_depth: Option<i32> = None;
     let mut pending_bytes: Vec<u8> = Vec::new();
-    // \'hh bytes are in the document's code page. Always reading them as
-    // GB18030 turned TextEdit's \'e9 (é, code page 1252) into nothing.
-    let enc = rtf_encoding(s);
-    let flush = |pb: &mut Vec<u8>, out: &mut String| {
+    // \'hh bytes are in the code page of the font they are set in, else the
+    // document's. Always reading them as GB18030 turned TextEdit's \'e9 (é,
+    // code page 1252) into nothing; reading every byte in the code page of
+    // any Chinese font in the table did the same to a Western font beside it.
+    let fallback = rtf_encoding(s);
+    let fonts = rtf_font_encodings(s);
+    let deff = rtf_number_after(s, "\\deff");
+    let mut enc = deff.and_then(|f| fonts.get(&f).copied()).unwrap_or(fallback);
+    // Font changes end with the group they were made in.
+    let mut enc_stack: Vec<&'static encoding_rs::Encoding> = Vec::new();
+    let flush = |pb: &mut Vec<u8>, out: &mut String, enc: &'static encoding_rs::Encoding| {
         if !pb.is_empty() {
             let (t, _) = enc.decode_without_bom_handling(pb);
             out.push_str(&t);
@@ -494,10 +534,16 @@ pub(crate) fn strip_rtf(s: &str) -> String {
         let c = b[i];
         match c {
             '{' => {
+                flush(&mut pending_bytes, &mut out, enc);
+                enc_stack.push(enc);
                 depth += 1;
                 i += 1;
             }
             '}' => {
+                flush(&mut pending_bytes, &mut out, enc);
+                if let Some(e) = enc_stack.pop() {
+                    enc = e;
+                }
                 if skip_depth == Some(depth) {
                     skip_depth = None;
                 }
@@ -520,7 +566,7 @@ pub(crate) fn strip_rtf(s: &str) -> String {
                     i += 3;
                     continue;
                 }
-                flush(&mut pending_bytes, &mut out);
+                flush(&mut pending_bytes, &mut out, enc);
                 if n.is_ascii_alphabetic() {
                     let start = i;
                     while i < b.len() && b[i].is_ascii_alphabetic() {
@@ -541,6 +587,13 @@ pub(crate) fn strip_rtf(s: &str) -> String {
                     match word.as_str() {
                         "fonttbl" | "colortbl" | "stylesheet" | "info" | "pict" | "header" | "footer" => {
                             skip_depth.get_or_insert(depth);
+                        }
+                        "f" if skip_depth.is_none() => {
+                            if let Some(e) = num.and_then(|f| fonts.get(&(f as u32)).copied()) {
+                                enc = e;
+                            } else {
+                                enc = fallback;
+                            }
                         }
                         "par" | "line" | "row" if skip_depth.is_none() => out.push('\n'),
                         "tab" | "cell" if skip_depth.is_none() => out.push(' '),
@@ -571,7 +624,7 @@ pub(crate) fn strip_rtf(s: &str) -> String {
             }
             '\r' | '\n' => i += 1,
             _ => {
-                flush(&mut pending_bytes, &mut out);
+                flush(&mut pending_bytes, &mut out, enc);
                 if skip_depth.is_none() {
                     out.push(c);
                 }
@@ -579,8 +632,66 @@ pub(crate) fn strip_rtf(s: &str) -> String {
             }
         }
     }
-    flush(&mut pending_bytes, &mut out);
+    flush(&mut pending_bytes, &mut out, enc);
     out
+}
+
+/// The RTF header: the font table and code page are at the start.
+fn rtf_head(s: &str) -> &str {
+    let mut end = s.len().min(64 * 1024);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn rtf_number_after(s: &str, key: &str) -> Option<u32> {
+    let head = rtf_head(s);
+    let i = head.find(key)? + key.len();
+    let digits: String = head[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Each font in the table whose charset names a code page: `\fN … \fcharsetM`.
+fn rtf_font_encodings(s: &str) -> std::collections::HashMap<u32, &'static encoding_rs::Encoding> {
+    use encoding_rs::*;
+    let mut map = std::collections::HashMap::new();
+    let head = rtf_head(s);
+    let Some(start) = head.find("\\fonttbl") else { return map };
+    let ansi = rtf_ansi_encoding(head);
+    // Font entries end with ';'; the table ends where the next one does not start.
+    for entry in head[start + 8..].split(';').take(512) {
+        let Some((fi, _)) = entry.match_indices("\\f").find(|&(k, _)| entry[k + 2..].starts_with(|c: char| c.is_ascii_digit())) else { continue };
+        let num: String = entry[fi + 2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(num) = num.parse::<u32>() else { continue };
+        let cs = entry.find("\\fcharset").and_then(|k| {
+            entry[k + 9..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>().ok()
+        });
+        let enc = match cs {
+            Some(134) => GB18030,
+            Some(136) => BIG5,
+            Some(128) => SHIFT_JIS,
+            Some(129) => EUC_KR,
+            Some(222) => WINDOWS_874,
+            Some(238) => WINDOWS_1250,
+            Some(204) => WINDOWS_1251,
+            Some(161) => WINDOWS_1253,
+            Some(162) => WINDOWS_1254,
+            Some(177) => WINDOWS_1255,
+            Some(178) => WINDOWS_1256,
+            Some(186) => WINDOWS_1257,
+            Some(163) => WINDOWS_1258,
+            Some(77) => MACINTOSH,
+            // ANSI or "default": the document's \ansicpg, when it names one.
+            Some(0 | 1) => match ansi {
+                Some(e) => e,
+                None => continue,
+            },
+            _ => continue,
+        };
+        map.insert(num, enc);
+    }
+    map
 }
 
 /// The code page of an RTF file's \'hh bytes: `\ansicpgN`, or a Chinese,
@@ -588,16 +699,7 @@ pub(crate) fn strip_rtf(s: &str) -> String {
 /// nothing says otherwise (Lumen's long-standing default).
 fn rtf_encoding(s: &str) -> &'static encoding_rs::Encoding {
     use encoding_rs::*;
-    let mut end = s.len().min(64 * 1024);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let head = &s[..end];
-    let num_after = |key: &str| -> Option<u32> {
-        let i = head.find(key)? + key.len();
-        let digits: String = head[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
-        digits.parse().ok()
-    };
+    let head = rtf_head(s);
     // A CJK font in the font table: its bytes are in that script's code page
     // even when \ansicpg says 1252 (Word writes both).
     for (cs, enc) in [("\\fcharset134", GB18030), ("\\fcharset136", BIG5), ("\\fcharset128", SHIFT_JIS), ("\\fcharset129", EUC_KR)] {
@@ -605,25 +707,34 @@ fn rtf_encoding(s: &str) -> &'static encoding_rs::Encoding {
             return enc;
         }
     }
-    match num_after("\\ansicpg") {
-        Some(936 | 54936 | 20936) => GB18030,
-        Some(950) => BIG5,
-        Some(932) => SHIFT_JIS,
-        Some(949) => EUC_KR,
-        Some(874) => WINDOWS_874,
-        Some(1250) => WINDOWS_1250,
-        Some(1251) => WINDOWS_1251,
-        Some(1252) => WINDOWS_1252,
-        Some(1253) => WINDOWS_1253,
-        Some(1254) => WINDOWS_1254,
-        Some(1255) => WINDOWS_1255,
-        Some(1256) => WINDOWS_1256,
-        Some(1257) => WINDOWS_1257,
-        Some(1258) => WINDOWS_1258,
-        Some(10000) => MACINTOSH,
-        _ if head.contains("\\mac") && !head.contains("\\ansi") => MACINTOSH,
-        _ => GB18030,
+    match rtf_ansi_encoding(head) {
+        Some(e) => e,
+        None if head.contains("\\mac") && !head.contains("\\ansi") => MACINTOSH,
+        None => GB18030,
     }
+}
+
+/// The code page `\ansicpgN` names, if Lumen knows it.
+fn rtf_ansi_encoding(head: &str) -> Option<&'static encoding_rs::Encoding> {
+    use encoding_rs::*;
+    Some(match rtf_number_after(head, "\\ansicpg")? {
+        936 | 54936 | 20936 => GB18030,
+        950 => BIG5,
+        932 => SHIFT_JIS,
+        949 => EUC_KR,
+        874 => WINDOWS_874,
+        1250 => WINDOWS_1250,
+        1251 => WINDOWS_1251,
+        1252 => WINDOWS_1252,
+        1253 => WINDOWS_1253,
+        1254 => WINDOWS_1254,
+        1255 => WINDOWS_1255,
+        1256 => WINDOWS_1256,
+        1257 => WINDOWS_1257,
+        1258 => WINDOWS_1258,
+        10000 => MACINTOSH,
+        _ => return None,
+    })
 }
 
 /// Collapse runs of whitespace, drop control characters, cap the length.

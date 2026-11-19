@@ -42,9 +42,11 @@ function human(bytes: number): string {
   return i === 0 ? `${bytes} B` : `${v.toFixed(1)} ${units[i]}`;
 }
 
+/** "/Users/a/Documents" → "~/Documents"; only a whole leading home folder ("/Users/ab" stays). */
 function tilde(p: string): string {
-  const home = homedir();
-  return p.startsWith(home) ? "~" + p.slice(home.length) : p;
+  const home = homedir().replace(/\/+$/, "");
+  if (!home) return p;
+  return p === home || p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
 }
 
 /** The search list shared by both commands; `mode` picks the CLI subcommand. */

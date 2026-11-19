@@ -33,6 +33,15 @@ struct AppState {
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
     embedding: Arc<AtomicBool>,
+    /// A scan was asked for (new settings, a drive plugged in, a rebuild)
+    /// while one was running: run another when it ends, with the new config.
+    rescan: Arc<AtomicBool>,
+    /// The same for reading: a scan added files while a reading pass (whose
+    /// list was already made) was running.
+    reread: Arc<AtomicBool>,
+    /// rebuild_index is stopping work and wiping the index: nothing may start
+    /// a watcher or a reading pass on the old rows until it has.
+    rebuilding: AtomicBool,
     /// The index file was damaged at launch and has been started over (v0.8).
     rebuilt: AtomicBool,
 }
@@ -140,15 +149,40 @@ fn start_scan(app: AppHandle, state: State<AppState>) -> Res<()> {
     run_scan(&app, &state)
 }
 
+/// Clears a busy flag when dropped, so a panic or an early return can never
+/// leave Lumen thinking a scan or a reading pass is still running.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A scan that must see the current settings: when one is already running
+/// (with the old roots, exclusions or drives), run another right after it.
+/// Plain `run_scan` joined the running scan and the change was not indexed
+/// until the next launch.
+fn run_scan_fresh(app: &AppHandle, state: &AppState) -> Res<()> {
+    if state.scanning.load(Ordering::SeqCst) {
+        state.rescan.store(true, Ordering::SeqCst);
+    }
+    run_scan(app, state)
+}
+
 fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
     if state.scanning.swap(true, Ordering::SeqCst) {
         return Ok(()); // already running; the UI is subscribed to its events
     }
+    let busy = Busy(state.scanning.clone());
+    // This scan reads the settings as they are now: an earlier request for
+    // a fresh scan is answered by it.
+    state.rescan.store(false, Ordering::SeqCst);
+    let rescan = state.rescan.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     *state.cancel.lock().unwrap() = Some(cancel.clone());
     let index = state.index.clone();
     let cfg = state.config.lock().unwrap().clone();
-    let scanning = state.scanning.clone();
     let app = app.clone();
     std::thread::Builder::new()
         .name("lumen-scan".into())
@@ -158,7 +192,21 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
             let result = scan(&index, &cfg, cancel, |p| {
                 let _ = emitter.emit("scan://progress", p);
             });
-            scanning.store(false, Ordering::SeqCst);
+            drop(busy);
+            // Settings changed (or a drive came) while this scan ran: scan
+            // again with them instead of reading with the old ones.
+            // The UI keeps showing one scan: no "done" for this one, the next
+            // one's progress and result follow.
+            if rescan.swap(false, Ordering::SeqCst) {
+                let state = app.state::<AppState>();
+                // (A rebuild scans by itself once the index is wiped.)
+                if !state.rebuilding.load(Ordering::SeqCst) {
+                    if let Err(e) = run_scan(&app, &state) {
+                        let _ = app.emit("scan://error", e);
+                    }
+                }
+                return;
+            }
             match result {
                 Ok(report) => {
                     let _ = app.emit("scan://done", &report);
@@ -187,12 +235,15 @@ fn run_scan(app: &AppHandle, state: &AppState) -> Res<()> {
                 }
             }
         })
-        .map_err(err)?;
+        .map_err(err)?; // (the closure, and `busy` with it, is dropped on failure)
     Ok(())
 }
 
 #[tauri::command]
 fn cancel_scan(state: State<AppState>) {
+    // Stopped means stopped: no queued scan or reading pass starts after.
+    state.rescan.store(false, Ordering::SeqCst);
+    state.reread.store(false, Ordering::SeqCst);
     if let Some(c) = state.cancel.lock().unwrap().as_ref() {
         c.store(true, Ordering::Relaxed);
     }
@@ -204,13 +255,21 @@ fn cancel_scan(state: State<AppState>) {
 /// Read the words of new and changed documents, after a scan.
 fn run_content(app: &AppHandle) {
     let state = app.state::<AppState>();
-    if state.reading.swap(true, Ordering::SeqCst) {
+    if state.rebuilding.load(Ordering::SeqCst) {
         return;
     }
+    if state.reading.swap(true, Ordering::SeqCst) {
+        // The running pass will not see this scan's new files: read again
+        // after it, rather than at the next launch.
+        state.reread.store(true, Ordering::SeqCst);
+        return;
+    }
+    let busy = Busy(state.reading.clone());
+    state.reread.store(false, Ordering::SeqCst);
+    let reread = state.reread.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     *state.read_cancel.lock().unwrap() = Some(cancel.clone());
     let index = state.index.clone();
-    let reading = state.reading.clone();
     let app = app.clone();
     let _ = std::thread::Builder::new().name("lumen-content".into()).spawn(move || {
         pace::background_thread();
@@ -218,12 +277,16 @@ fn run_content(app: &AppHandle) {
         let r = index_content(&index, cancel.clone(), |p| {
             let _ = emitter.emit("content://progress", p);
         });
-        reading.store(false, Ordering::SeqCst);
+        drop(busy);
         match r {
             Ok(report) => {
                 let _ = app.emit("content://done", &report);
             }
             Err(e) => log::warn!("content indexing failed: {e}"),
+        }
+        if !cancel.load(Ordering::Relaxed) && reread.swap(false, Ordering::SeqCst) {
+            run_content(&app);
+            return;
         }
         // Vectors use the first lines of each file's text, so they come after.
         if !cancel.load(Ordering::Relaxed) {
@@ -238,14 +301,15 @@ fn run_semantic(app: &AppHandle, cancel: Arc<AtomicBool>) {
         return;
     }
     let state = app.state::<AppState>();
-    if state.embedding.swap(true, Ordering::SeqCst) {
+    if state.rebuilding.load(Ordering::SeqCst) || state.embedding.swap(true, Ordering::SeqCst) {
         return;
     }
+    let busy = Busy(state.embedding.clone());
     let emitter = app.clone();
     let r = index_semantic(&state.index, cancel, |p| {
         let _ = emitter.emit("semantic://progress", p);
     });
-    state.embedding.store(false, Ordering::SeqCst);
+    drop(busy);
     match r {
         Ok(report) => {
             let _ = app.emit("semantic://done", &report);
@@ -256,6 +320,11 @@ fn run_semantic(app: &AppHandle, cancel: Arc<AtomicBool>) {
 
 fn restart_watcher(app: &AppHandle) {
     let state = app.state::<AppState>();
+    // A scan that ends while the index is being rebuilt must not bring the
+    // watcher back on rows about to be wiped; the rebuild's scan starts it.
+    if state.rebuilding.load(Ordering::SeqCst) {
+        return;
+    }
     let cfg = state.config.lock().unwrap().clone();
     let emitter = app.clone();
     let mut slot = state.watcher.lock().unwrap();
@@ -269,7 +338,7 @@ fn restart_watcher(app: &AppHandle) {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let state = app.state::<AppState>();
-                let _ = run_scan(&app, &state);
+                let _ = run_scan_fresh(&app, &state);
             });
         }
     }) {
@@ -286,7 +355,7 @@ fn set_roots(app: AppHandle, state: State<AppState>, roots: Vec<String>) -> Res<
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
@@ -298,7 +367,7 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
@@ -313,7 +382,7 @@ fn set_excluded_names(app: AppHandle, state: State<AppState>, names: Vec<String>
         cfg.save(&state.config_path).map_err(err)?;
         cfg.clone()
     };
-    run_scan(&app, &state)?;
+    run_scan_fresh(&app, &state)?;
     Ok(cfg)
 }
 
@@ -343,6 +412,7 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
+        state.rebuilding.store(true, Ordering::SeqCst);
         for slot in [&state.cancel, &state.read_cancel] {
             if let Some(c) = slot.lock().unwrap().as_ref() {
                 c.store(true, Ordering::Relaxed);
@@ -356,8 +426,15 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        state.index.reset().map_err(err)?;
-        run_scan(&handle, &state)
+        // A scan that finished just as the cancel landed may have started
+        // the watcher again before it saw `rebuilding`.
+        *state.watcher.lock().unwrap() = None;
+        let reset = state.index.reset().map_err(err);
+        state.rebuilding.store(false, Ordering::SeqCst);
+        reset?;
+        // A scan still running (it did not stop in time) is followed by a
+        // fresh one; before, the rebuild then scanned nothing at all.
+        run_scan_fresh(&handle, &state)
     })
     .await
     .map_err(err)?
@@ -516,7 +593,7 @@ fn set_options(
     }
     // Only the options that change what is indexed need a scan.
     if content_search.is_some() || include_external.is_some() || include_icloud.is_some() || ocr.is_some() || semantic == Some(true) {
-        run_scan(&app, &state)?;
+        run_scan_fresh(&app, &state)?;
     }
     Ok(cfg)
 }
@@ -978,6 +1055,9 @@ fn main() {
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
                 embedding: Arc::new(AtomicBool::new(false)),
+                rescan: Arc::new(AtomicBool::new(false)),
+                reread: Arc::new(AtomicBool::new(false)),
+                rebuilding: AtomicBool::new(false),
                 rebuilt: AtomicBool::new(rebuilt),
             });
 

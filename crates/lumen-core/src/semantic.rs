@@ -182,8 +182,22 @@ fn embed_with_helper(bin: &std::path::Path, items: &[(Model, String)], timeout: 
             }
         }
     }
+    // Every answer is in (or the helper closed its output): give it until
+    // the deadline to exit. A helper that answered and then hung used to
+    // block indexing here for good.
     if out.len() < items.len() {
         let _ = child.kill();
+    } else {
+        loop {
+            match child.try_wait() {
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    break;
+                }
+                _ => break,
+            }
+        }
     }
     let _ = child.wait();
     anyhow::ensure!(out.len() == items.len(), "embed helper answered {} of {}", out.len(), items.len());
@@ -554,6 +568,20 @@ mod tests {
         let items: Vec<(Model, String)> = (0..4).map(|i| (Model::En, format!("s{i}"))).collect();
         let v = embed_with_helper(&bin, &items, std::time::Duration::from_secs(10)).unwrap();
         assert_eq!(v.iter().map(|x| x.is_some()).collect::<Vec<_>>(), vec![true, false, false, false]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_answers_then_hangs_is_not_waited_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("helper");
+        std::fs::write(&bin, "#!/bin/sh\ncat >/dev/null\nprintf '1,0,0,0,0,0,0,0\\n'\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let t = Instant::now();
+        let r = embed_with_helper(&bin, &[(Model::En, "a".into())], std::time::Duration::from_millis(500));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(r.unwrap().len(), 1);
     }
 
     #[test]
