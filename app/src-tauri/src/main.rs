@@ -66,8 +66,8 @@ struct Snapshot {
     index_rebuilt: bool,
 }
 
-#[tauri::command]
-fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
+#[tauri::command(async)]
+fn snapshot(app: AppHandle, window: tauri::Window, state: State<AppState>) -> Res<Snapshot> {
     let status = state.index.status().map_err(err)?;
     Ok(Snapshot {
         first_run: status.generation == 0,
@@ -81,7 +81,9 @@ fn snapshot(app: AppHandle, state: State<AppState>) -> Res<Snapshot> {
         semantic_ready: lumen_core::semantic::available(),
         semantic_files: lumen_core::semantic::semantic_count(&state.index).unwrap_or(0),
         hold: pace::hold(),
-        index_rebuilt: state.rebuilt.swap(false, Ordering::Relaxed),
+        // Only the main window says so (and clears it): the hidden quick panel
+        // also asks for a snapshot at launch and would otherwise swallow it.
+        index_rebuilt: if window.label() == "main" { state.rebuilt.swap(false, Ordering::Relaxed) } else { state.rebuilt.load(Ordering::Relaxed) },
     })
 }
 
@@ -89,7 +91,7 @@ fn lumen_home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn search(state: State<AppState>, req: SearchRequest) -> Res<SearchResponse> {
     state.index.search(&req).map_err(err)
 }
@@ -104,22 +106,22 @@ async fn semantic(state: State<'_, AppState>, req: SemanticRequest) -> Res<Seman
         .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn overview(state: State<AppState>) -> Res<Overview> {
     state.index.overview().map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn recent(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.recent(limit.unwrap_or(40)).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn largest(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.largest(limit.unwrap_or(40)).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn forgotten(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.forgotten(limit.unwrap_or(40)).map_err(err)
 }
@@ -276,7 +278,7 @@ fn restart_watcher(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_roots(app: AppHandle, state: State<AppState>, roots: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -288,7 +290,7 @@ fn set_roots(app: AppHandle, state: State<AppState>, roots: Vec<String>) -> Res<
     Ok(cfg)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -301,7 +303,7 @@ fn set_excluded(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> R
 }
 
 /// Folder names and "*.ext" patterns to skip (v0.8).
-#[tauri::command]
+#[tauri::command(async)]
 fn set_excluded_names(app: AppHandle, state: State<AppState>, names: Vec<String>) -> Res<Config> {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
@@ -325,12 +327,12 @@ fn set_paused(app: AppHandle, on: bool) -> Option<Hold> {
 }
 
 /// Searches to try after the first scan, from the user's own files.
-#[tauri::command]
+#[tauri::command(async)]
 fn suggestions(state: State<AppState>) -> Res<Vec<Suggestion>> {
     state.index.suggestions(3).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn recently_opened(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.recently_opened(limit.unwrap_or(20)).map_err(err)
 }
@@ -362,29 +364,29 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
 }
 
 /// Smart collections and how many files each holds.
-#[tauri::command]
+#[tauri::command(async)]
 fn collections(state: State<AppState>) -> Res<Vec<CollectionStat>> {
     state.index.collections().map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection(state: State<AppState>, id: String, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.collection(&id, limit.unwrap_or(200), offset.unwrap_or(0)).map_err(err)
 }
 
 /// Months that have files, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 fn timeline(state: State<AppState>) -> Res<Vec<MonthStat>> {
     state.index.timeline(240).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn month(state: State<AppState>, month: String, kind: Option<Kind>, limit: Option<usize>, offset: Option<usize>) -> Res<Vec<FileRecord>> {
     state.index.month(&month, kind, limit.unwrap_or(300), offset.unwrap_or(0)).map_err(err)
 }
 
 /// Save the share card PNG to the Desktop and show it in Finder.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_share_card(png: Vec<u8>) -> Res<String> {
     if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" || png.len() > 20 << 20 {
         return Err("not a PNG".into());
@@ -448,7 +450,7 @@ fn use_semantic(on: bool) {
 }
 
 /// Content search and external drives on or off.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_options(
     app: AppHandle,
     state: State<AppState>,
@@ -668,7 +670,7 @@ struct Trashed {
 
 /// Move files to the Trash (Finder's "Put Back" restores them) and forget
 /// them. Used by the duplicates view.
-#[tauri::command]
+#[tauri::command(async)]
 fn trash_paths(state: State<AppState>, paths: Vec<String>) -> Res<Trashed> {
     let present: Vec<&String> = paths.iter().filter(|p| Path::new(p).exists()).collect();
     let bytes = present.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
@@ -706,7 +708,7 @@ fn has_full_disk_access() -> bool {
 /// the list, switched off, and the user only flips the switch. Then open the
 /// pane: System Settings (macOS 13+) and System Preferences use different
 /// addresses. v0.8.0 skipped the first step, so the list had no Lumen in it.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_fda_settings() -> Res<()> {
     touch_protected();
     let pane = if macos_major() >= 13 {
@@ -782,7 +784,7 @@ fn relaunch_soon(app: &AppHandle) {
 }
 
 /// Polled by the UI while the user is in System Settings.
-#[tauri::command]
+#[tauri::command(async)]
 fn full_disk_access() -> bool {
     has_full_disk_access()
 }
@@ -874,7 +876,8 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
-            "show" => toggle_main(app),
+            // "Open Lumen" always opens: toggling hid a window already in front.
+            "show" => show_main(app),
             "quick" => toggle_quick(app),
             "rescan" => {
                 let state = app.state::<AppState>();

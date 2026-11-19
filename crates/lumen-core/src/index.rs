@@ -253,6 +253,11 @@ pub(crate) fn unix(t: std::time::SystemTime) -> i64 {
     }
 }
 
+/// A count or offset for SQL: clamped, since `usize as i64` wraps to -1.
+pub(crate) fn sql_int(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
 pub(crate) fn now() -> i64 {
     unix(std::time::SystemTime::now())
 }
@@ -346,11 +351,19 @@ impl Index {
     /// Forget everything; the next scan is a first scan again.
     pub fn reset(&self) -> Result<()> {
         let conn = self.conn();
+        // Row ids restart from 1 after this, so the vector revision must keep
+        // counting up: restarting it too let semantic search reuse a cached
+        // copy of the old vectors under the same (path, revision) key and
+        // answer with whichever new file got an old id.
+        let vec_rev = get_meta_i64(&conn, "vec_rev")?.unwrap_or(0);
         conn.execute_batch(
             "BEGIN;
-             DELETE FROM opens; DELETE FROM vectors; DELETE FROM content; DELETE FROM files; DELETE FROM meta;
-             COMMIT; VACUUM;",
+             DELETE FROM opens; DELETE FROM vectors; DELETE FROM content;
+             DELETE FROM files; DELETE FROM meta;
+             COMMIT;",
         )?;
+        set_meta(&conn, "vec_rev", vec_rev + 1)?;
+        conn.execute_batch("VACUUM;")?;
         drop(conn);
         self.forget_memos();
         Ok(())
@@ -428,7 +441,14 @@ impl Index {
         if version != 0 && version != SCHEMA_VERSION && version != 1 && version != 2 {
             // Future migrations go here. The index is a cache of the disk, so
             // the safe fallback is always "drop and rescan".
-            conn.execute_batch("DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;")?;
+            // Everything keyed by a file id goes too: ids restart once `files`
+            // is recreated, and leftover text, vectors or opens would be
+            // attached to whichever new file got the old id.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS files_fts; DROP TABLE IF EXISTS vectors; DROP TABLE IF EXISTS files;
+                 DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS content_fts; DROP TABLE IF EXISTS content;
+                 DROP TABLE IF EXISTS opens;",
+            )?;
         }
         conn.execute_batch(SCHEMA).context("creating schema")?;
         // v0.7: files.cloud (iCloud files not on this Mac).
@@ -528,7 +548,13 @@ impl Index {
 
     /// Forget a file Lumen found missing when the user tried to open it.
     pub fn remove_path(&self, path: &str) -> Result<usize> {
-        remove_tree(&self.conn(), path)
+        let n = remove_tree(&self.conn(), path)?;
+        // PRAGMA data_version only moves for other connections' commits, so a
+        // write on this one must drop the summaries itself.
+        if n > 0 {
+            self.forget_memos();
+        }
+        Ok(n)
     }
 
     /// The stored text of a file, if Lumen has read it.

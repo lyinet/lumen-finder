@@ -326,9 +326,10 @@ fn decode(buf: &[u8]) -> String {
     }
     if buf.starts_with(&[0xFF, 0xFE]) || buf.starts_with(&[0xFE, 0xFF]) {
         let le = buf[0] == 0xFF;
-        let units: Vec<u16> = buf[2..]
-            .chunks_exact(2)
-            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+        let units: Vec<u16> = (2..buf.len().saturating_sub(1))
+            .step_by(2)
+            .map(|i| [buf[i], buf[i + 1]])
+            .map(|c| if le { u16::from_le_bytes(c) } else { u16::from_be_bytes(c) })
             .collect();
         return String::from_utf16_lossy(&units);
     }
@@ -358,10 +359,12 @@ fn zip_xml(path: &Path, want: impl Fn(&str) -> bool) -> Result<String> {
     let mut out = String::new();
     for n in names {
         let mut f = zip.by_name(&n)?;
-        let mut xml = String::new();
+        let mut xml = Vec::new();
         // Guard against zip bombs: no part of a document needs more than this.
-        (&mut f).take(32 * 1024 * 1024).read_to_string(&mut xml)?;
-        out.push_str(&strip_markup(&xml));
+        (&mut f).take(32 * 1024 * 1024).read_to_end(&mut xml)?;
+        // Lossy: one bad byte (or the cap cutting a character in half) used
+        // to fail the whole document.
+        out.push_str(&strip_markup(&String::from_utf8_lossy(&xml)));
         out.push('\n');
         if out.len() > MAX_TEXT_CHARS * 4 {
             break;
@@ -389,7 +392,11 @@ pub(crate) fn strip_markup(s: &str) -> String {
     let mut skip_until: Option<&str> = None;
     while let Some((i, c)) = chars.next() {
         if let Some(end) = skip_until {
-            if s[i..].starts_with(end) {
+            // HTML tags are case-insensitive: </SCRIPT> ends <SCRIPT>. A
+            // case-sensitive match skipped everything after an upper-case
+            // script or style block.
+            let head = s.as_bytes().get(i..i + end.len());
+            if head.is_some_and(|h| h.eq_ignore_ascii_case(end.as_bytes())) {
                 skip_until = None; // fall through: the closing tag is skipped below
             } else {
                 continue;
@@ -597,10 +604,12 @@ pub(crate) fn normalize(s: &str) -> String {
 /// A short excerpt of `body` around the first of `terms` it contains, for the
 /// result row: "…合同期限为 三年，自 2024 年…".
 pub fn snippet(body: &str, terms: &[String], radius: usize) -> Option<String> {
-    let lower = body.to_lowercase();
-    // Lowercasing can change byte offsets for a few scripts; only trust it
-    // when lengths agree, otherwise search case-sensitively.
-    let folded = lower.len() == body.len();
+    // Lowercasing can change byte offsets for a few characters (İ grows,
+    // the Kelvin sign shrinks). Only search the lowercased text when every
+    // character keeps its length, so its offsets are the body's: equal total
+    // lengths are not enough and sliced the body mid-character.
+    let folded = body.chars().all(|c| c.to_lowercase().map(char::len_utf8).sum::<usize>() == c.len_utf8());
+    let lower = if folded { body.to_lowercase() } else { String::new() };
     let hay = if folded { lower.as_str() } else { body };
     let (pos, len) = terms
         .iter()

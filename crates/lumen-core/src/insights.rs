@@ -119,7 +119,9 @@ impl Index {
                 "SELECT size FROM files WHERE size >= ?1 AND cloud = 0 GROUP BY size HAVING count(*) > 1
                  ORDER BY size DESC LIMIT ?2",
             )?;
-            let v = stmt.query_map(params![min_size.max(1), (max_groups * 4) as i64], |r| r.get(0))?.flatten().collect();
+            // max_groups comes from callers: usize::MAX * 4 must not overflow.
+            let cap = i64::try_from(max_groups.saturating_mul(4)).unwrap_or(i64::MAX);
+            let v = stmt.query_map(params![min_size.max(1), cap], |r| r.get(0))?.flatten().collect();
             v
         };
         let mut groups = Vec::new();
@@ -146,6 +148,11 @@ impl Index {
             }
             for ids in by_hash.into_values().filter(|v| v.len() > 1) {
                 let files: Vec<FileRecord> = ids.iter().filter_map(|id| self.get(*id).ok().flatten()).collect();
+                // A copy can leave the index while this runs (the watcher):
+                // one file left is not a duplicate, and none would be -size wasted.
+                if files.len() < 2 {
+                    continue;
+                }
                 let wasted = size * (files.len() as i64 - 1);
                 groups.push(DuplicateGroup { size, files, wasted });
             }
@@ -153,7 +160,7 @@ impl Index {
                 break;
             }
         }
-        groups.sort_by(|a, b| b.wasted.cmp(&a.wasted));
+        groups.sort_by_key(|g| std::cmp::Reverse(g.wasted));
         groups.truncate(max_groups);
         Ok(groups)
     }

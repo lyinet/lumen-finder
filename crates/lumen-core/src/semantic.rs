@@ -172,6 +172,8 @@ fn parse_vec(line: &str) -> Option<Vec<f32>> {
 
 // ------------------------------------------------------------ vectors ----
 
+// `!(n > 1e-9)` on purpose: it is also true for NaN, which `n <= 1e-9` is not.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn normalize(v: &mut [f32]) -> bool {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if !(n > 1e-9) {

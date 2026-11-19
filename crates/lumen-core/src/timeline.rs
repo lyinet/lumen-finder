@@ -65,7 +65,7 @@ impl Index {
                 }
             }
             for m in &mut out {
-                m.kinds.sort_by(|a, b| b.files.cmp(&a.files));
+                m.kinds.sort_by_key(|k| std::cmp::Reverse(k.files));
                 m.kinds.truncate(4);
             }
             Ok(out)
@@ -85,7 +85,9 @@ impl Index {
         ))?;
         let k = kind.map(|k| k.as_i64()).unwrap_or(-1);
         let v = stmt
-            .query_map(params![month, k, limit as i64, offset as i64], FileRecord::from_row)?
+            // `as i64` turned usize::MAX into -1, which SQLite reads as "no
+            // limit" / "no offset": a page far past the end came back as page one.
+            .query_map(params![month, k, crate::index::sql_int(limit), crate::index::sql_int(offset)], FileRecord::from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(v)
     }

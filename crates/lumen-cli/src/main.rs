@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let alfred = take_flag(&mut args, "--alfred");
     let json = take_flag(&mut args, "--json") && !alfred;
-    let db = take_opt(&mut args, "--db").map(PathBuf::from).unwrap_or_else(default_db);
+    let db = take_opt(&mut args, "--db")?.map(PathBuf::from).unwrap_or_else(default_db);
     let cmd = if args.is_empty() { "help".to_string() } else { args.remove(0) };
     let index = Index::open(&db)?;
     set_embed_helper(Some(helper_path()));
@@ -157,7 +157,7 @@ fn read_content(index: &Index, json: bool) -> Result<()> {
 fn print_alfred<'a>(hits: impl Iterator<Item = (&'a FileRecord, Option<&'a str>)>) -> Result<()> {
     let items: Vec<serde_json::Value> = hits
         .map(|(f, snippet)| {
-            let place = f.parent.replace(&std::env::var("HOME").unwrap_or_default(), "~");
+            let place = tilde(&f.parent, &std::env::var("HOME").unwrap_or_default());
             let mut sub = match snippet {
                 Some(s) => format!("{s} · {place}"),
                 None => place,
@@ -192,10 +192,27 @@ fn take_flag(args: &mut Vec<String>, f: &str) -> bool {
     n != args.len()
 }
 
-fn take_opt(args: &mut Vec<String>, f: &str) -> Option<String> {
-    let i = args.iter().position(|a| a == f)?;
+/// `--db PATH`. A flag with no value is an error: before, `lumen search x --db`
+/// quietly used the app's own index instead of the one asked for.
+fn take_opt(args: &mut Vec<String>, f: &str) -> Result<Option<String>> {
+    let Some(i) = args.iter().position(|a| a == f) else { return Ok(None) };
     args.remove(i);
-    (i < args.len()).then(|| args.remove(i))
+    anyhow::ensure!(i < args.len(), "{f} needs a value");
+    Ok(Some(args.remove(i)))
+}
+
+/// "/Users/a/Documents" → "~/Documents". Only a whole leading home folder:
+/// a plain `replace` turned "/Users/ab" into "~b", and with HOME unset or
+/// empty put a "~" between every character.
+fn tilde(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 fn data_dir() -> PathBuf {
@@ -231,4 +248,29 @@ fn human(b: i64) -> String {
         i += 1;
     }
     if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", units[i]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_becomes_tilde_only_as_a_prefix() {
+        assert_eq!(tilde("/Users/a/Documents", "/Users/a"), "~/Documents");
+        assert_eq!(tilde("/Users/a", "/Users/a/"), "~");
+        assert_eq!(tilde("/Users/ab/x", "/Users/a"), "/Users/ab/x");
+        assert_eq!(tilde("/Volumes/Users/a/x", "/Users/a"), "/Volumes/Users/a/x");
+        assert_eq!(tilde("/Users/a/x", ""), "/Users/a/x");
+    }
+
+    #[test]
+    fn db_flag_needs_a_value() {
+        let mut a: Vec<String> = vec!["search".into(), "x".into(), "--db".into()];
+        assert!(take_opt(&mut a, "--db").is_err());
+        let mut a: Vec<String> = vec!["--db".into(), "/tmp/i.db".into(), "stats".into()];
+        assert_eq!(take_opt(&mut a, "--db").unwrap().as_deref(), Some("/tmp/i.db"));
+        assert_eq!(a, vec!["stats".to_string()]);
+        let mut a: Vec<String> = vec!["stats".into()];
+        assert_eq!(take_opt(&mut a, "--db").unwrap(), None);
+    }
 }

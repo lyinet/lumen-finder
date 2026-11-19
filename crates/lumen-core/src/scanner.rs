@@ -329,8 +329,46 @@ pub(crate) fn apply_paths(
                 }
             }
             Ok(_) => {}
+            // Unreadable is not gone: a folder whose access was revoked (macOS
+            // privacy settings, chmod) keeps its files listed. Only a path that
+            // no longer exists is removed.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
             Err(_) => removed += remove_tree(conn, &p.to_string_lossy())?,
         }
     }
     Ok((upserted, removed))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn unreadable_is_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let locked = home.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let file = locked.join("plan.pdf");
+        std::fs::write(&file, b"pdf").unwrap();
+        let index = Index::open(dir.path().join("index.db")).unwrap();
+        let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+        scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(index.file_count().unwrap(), 1);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::symlink_metadata(&file).is_err();
+        let mut conn = index.writer().unwrap();
+        let r = apply_paths(&mut conn, std::slice::from_ref(&file), &cfg.filter(), &cfg.effective_roots());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !denied {
+            return; // running as root: permissions are not enforced
+        }
+        assert_eq!(r.unwrap(), (0, 0));
+        assert_eq!(index.file_count().unwrap(), 1);
+        // A path that is really gone is still removed.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(apply_paths(&mut conn, &[file], &cfg.filter(), &cfg.effective_roots()).unwrap(), (0, 1));
+    }
 }

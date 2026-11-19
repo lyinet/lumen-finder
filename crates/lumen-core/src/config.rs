@@ -211,11 +211,30 @@ pub fn icloud_drive() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// Never fails: a missing or unreadable file means defaults, and a file
+    /// with one bad value (a null, a wrong type from an older or hand-edited
+    /// config) keeps every other setting. Before, one bad field threw the whole
+    /// file away, roots and exclusions included.
     pub fn load(path: &Path) -> Config {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Ok(text) = std::fs::read_to_string(path) else { return Config::default() };
+        let text = text.trim_start_matches('\u{feff}');
+        if let Ok(c) = serde_json::from_str::<Config>(text) {
+            return c;
+        }
+        let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Config::default();
+        };
+        let mut good = serde_json::Map::new();
+        for (key, value) in fields {
+            let mut one = serde_json::Map::new();
+            one.insert(key.clone(), value.clone());
+            if serde_json::from_value::<Config>(serde_json::Value::Object(one)).is_ok() {
+                good.insert(key, value);
+            } else {
+                log::warn!("config: ignoring bad value for {key:?}");
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(good)).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
