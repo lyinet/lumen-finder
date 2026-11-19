@@ -199,6 +199,35 @@ fn precompose_names_once(conn: &mut rusqlite::Connection) -> Result<()> {
         for (id, name, parent) in fix {
             put.execute(rusqlite::params![id, name, crate::pinyin_key(&name), parent])?;
         }
+        // An older watcher could add a twin row for a file under the other
+        // spelling of its path, and the user may have opened it from either.
+        // The scan keeps only the spelling the folder lists, so first give
+        // every twin the pair's open history: whichever stays keeps it.
+        use rusqlite::OptionalExtension;
+        use unicode_normalization::{is_nfc_quick, is_nfd_quick, IsNormalized};
+        let mut twins: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+        let mut read = tx.prepare("SELECT id, path FROM files")?;
+        let rows = read.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for (id, path) in rows.filter_map(|r| r.ok()) {
+            let two_forms = !path.is_ascii()
+                && !(is_nfc_quick(path.chars()) == IsNormalized::Yes && is_nfd_quick(path.chars()) == IsNormalized::Yes);
+            if two_forms {
+                twins.entry(crate::nfc(&path).into_owned()).or_default().push(id);
+            }
+        }
+        let mut total = tx.prepare(
+            "SELECT sum(count), max(last) FROM opens WHERE id IN (SELECT value FROM json_each(?1)) HAVING count(*) > 0",
+        )?;
+        let mut put = tx.prepare("INSERT OR REPLACE INTO opens(id, count, last) VALUES (?1, ?2, ?3)")?;
+        for ids in twins.values().filter(|v| v.len() > 1) {
+            let both: Option<(i64, i64)> =
+                total.query_row([serde_json::to_string(ids)?], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some((count, last)) = both {
+                for id in ids {
+                    put.execute(rusqlite::params![id, count, last])?;
+                }
+            }
+        }
     }
     set_meta(&tx, "nfc_v1", 1)?;
     tx.commit()?;
@@ -466,11 +495,43 @@ struct Spelled {
 /// added a second row for the file, and a removal left the first one.
 /// Only names that can be spelled two ways are looked up (one folder
 /// listing each, cached for the batch); ASCII and Chinese names are not.
-fn spell_as_listed(
-    p: &Path,
-    roots: &[PathBuf],
-    listings: &mut std::collections::HashMap<PathBuf, Vec<std::ffi::OsString>>,
-) -> Spelled {
+/// One folder's names, for looking a name up in either form at once (a
+/// folder of thousands, with thousands of events in it, was matched name by
+/// name).
+#[derive(Default)]
+struct Listing {
+    exact: std::collections::HashSet<std::ffi::OsString>,
+    /// Precomposed form → the name as listed, for names with two forms.
+    by_form: std::collections::HashMap<String, std::ffi::OsString>,
+}
+
+impl Listing {
+    fn read(dir: &Path) -> Listing {
+        let mut l = Listing::default();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = e.file_name();
+            if !one_form(&name) {
+                if let Some(s) = name.to_str() {
+                    l.by_form.entry(crate::nfc(s).into_owned()).or_insert_with(|| name.clone());
+                }
+            }
+            l.exact.insert(name);
+        }
+        l
+    }
+
+    /// The listed name `name` stands for, if any.
+    fn find(&self, name: &std::ffi::OsStr) -> Option<&std::ffi::OsStr> {
+        if let Some(e) = self.exact.get(name) {
+            return Some(e);
+        }
+        self.by_form.get(&*crate::nfc(name.to_str()?)).map(|e| e.as_os_str())
+    }
+}
+
+type Listings = std::collections::HashMap<PathBuf, Listing>;
+
+fn spell_as_listed(p: &Path, roots: &[PathBuf], listings: &mut Listings) -> Spelled {
     let unchanged = || Spelled { path: p.to_path_buf(), missing: 0, stale: Vec::new() };
     if p.to_str().is_none_or(|s| s.is_ascii()) {
         return unchanged();
@@ -498,17 +559,17 @@ fn spell_as_listed(
             out.push(name);
             continue;
         }
-        let listed = listings.entry(out.clone()).or_insert_with(|| {
-            std::fs::read_dir(&out).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
-        });
-        if listed.iter().any(|e| e == name) {
-            out.push(name);
-        } else if let Some(real) = listed.iter().find(|e| same_name(e, name)) {
-            stale.push(out.join(name));
-            out.push(real);
-        } else {
-            out.push(name);
-            missing = 1;
+        let listed = listings.entry(out.clone()).or_insert_with(|| Listing::read(&out));
+        match listed.find(name) {
+            Some(real) if real == *name => out.push(name),
+            Some(real) => {
+                stale.push(out.join(name));
+                out.push(real);
+            }
+            None => {
+                out.push(name);
+                missing = 1;
+            }
         }
     }
     Spelled { path: out, missing, stale }
@@ -761,6 +822,32 @@ mod tests {
         assert_eq!(apply_paths(&mut conn, &[event], &cfg.filter(), &cfg.effective_roots()).unwrap(), (1, 0));
         let p: String = conn.query_row("SELECT path FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(p, home.join("plan.pdf").to_string_lossy());
+    }
+
+    #[test]
+    fn many_accented_events_in_a_big_folder_stay_quick() {
+        // Unzipping a few thousand accented names into a big folder: each
+        // event's name was matched against the whole listing (normalizing
+        // every entry), seconds of the watcher holding the index.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        for i in 0..20_000 {
+            std::fs::write(home.join(format!("f{i}.txt")), b"").unwrap();
+        }
+        let mut events = Vec::new();
+        for i in 0..2_000 {
+            std::fs::write(home.join(format!("Cafe\u{301}{i}.txt")), b"x").unwrap();
+            events.push(home.join(format!("Caf\u{e9}{i}.txt")));
+        }
+        let mut listings = std::collections::HashMap::new();
+        let started = Instant::now();
+        for p in &events {
+            let s = spell_as_listed(p, std::slice::from_ref(&home), &mut listings);
+            assert_eq!(s.missing, 0);
+            assert_eq!(s.stale.len(), 1);
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
     }
 
     #[test]

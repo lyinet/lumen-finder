@@ -79,3 +79,43 @@ fn rows_from_before_get_precomposed_names() {
     assert_eq!(names(&index, "caf\u{e9}"), vec![CAFE_NFC.to_string()]);
     assert_eq!(names(&index, &format!("in:{RESUME_NFC}")).len(), 1);
 }
+
+#[test]
+fn history_on_a_twin_row_from_before_survives_the_upgrade() {
+    // An older Lumen's watcher added a second row for a decomposed file,
+    // under the precomposed spelling of its path, and the user opened the
+    // file from that row. The upgrade's scan drops the twin (the folder does
+    // not list that spelling); the file's open history must stay with it.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(home.join(RESUME_NFD)).unwrap();
+    let path = home.join(RESUME_NFD).join(CAFE_NFD);
+    fs::write(&path, b"x").unwrap();
+    let index = Index::open(dir.path().join("i.db")).unwrap();
+    let meta = fs::metadata(&path).unwrap();
+    let row = |p: &std::path::Path, name: &str| index::NewFile {
+        path: p.to_string_lossy().into(),
+        name: name.into(),
+        name_py: String::new(),
+        parent: p.parent().unwrap().to_string_lossy().into(),
+        ext: "txt".into(),
+        kind: Kind::Document,
+        size: meta.len() as i64,
+        mtime: meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
+        ctime: 0,
+        cloud: false,
+    };
+    let twin = home.join(RESUME_NFC).join(CAFE_NFC);
+    index.insert_files(&[row(&path, CAFE_NFD), row(&twin, CAFE_NFC)]).unwrap();
+    index.record_open(&twin.to_string_lossy()).unwrap();
+    index.record_open(&twin.to_string_lossy()).unwrap();
+    index.record_open(&path.to_string_lossy()).unwrap();
+    let cfg = Config { roots: vec![home.clone()], ..Config::default() };
+    scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(index.file_count().unwrap(), 1);
+    let recent = index.recently_opened(10).unwrap();
+    assert_eq!(recent.len(), 1, "the open history went with the twin row");
+    assert_eq!(recent[0].path, path.to_string_lossy());
+    let count: i64 = index.conn().query_row("SELECT count FROM opens", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 3, "both rows' opens, counted once");
+}

@@ -123,7 +123,56 @@ pub fn index_content(
     on_progress: impl FnMut(&ContentProgress),
 ) -> Result<ContentReport> {
     let mut conn = index.writer()?;
+    if !precompose_text_once(&mut conn, &cancel)? {
+        return Ok(ContentReport { read: 0, with_text: 0, failed: 0, elapsed_ms: 0, cancelled: true, left: false });
+    }
     index_pending(&mut conn, &cancel, true, on_progress)
+}
+
+/// Text is stored precomposed since 0.8.2 (see `crate::nfc`), but a document
+/// read before keeps its old text until the file changes: decomposed Hangul
+/// or accents that typed words never match. Fix it in place once, in
+/// batches (each committed, so a pass cut short resumes where it stopped).
+/// Returns false when cancelled before the end.
+fn precompose_text_once(conn: &mut Connection, cancel: &AtomicBool) -> Result<bool> {
+    use crate::index::{get_meta_i64, set_meta};
+    const DONE: &str = "nfc_text_v1";
+    const AT: &str = "nfc_text_at";
+    if get_meta_i64(conn, DONE)?.is_some() {
+        return Ok(true);
+    }
+    let mut at = get_meta_i64(conn, AT)?.unwrap_or(0);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare_cached("SELECT id, body FROM content WHERE id > ?1 ORDER BY id LIMIT 256")?;
+            let rows = stmt.query_map([at], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let Some(&(last, _)) = rows.last() else { break };
+        let tx = conn.transaction()?;
+        {
+            let mut put = tx.prepare_cached("UPDATE content SET body = ?2 WHERE id = ?1")?;
+            let mut fts_del = tx.prepare_cached("DELETE FROM content_fts WHERE rowid = ?1")?;
+            let mut fts_ins = tx.prepare_cached("INSERT INTO content_fts(rowid, toks) VALUES (?1, ?2)")?;
+            for (id, body) in &rows {
+                if let std::borrow::Cow::Owned(fixed) = crate::nfc(body) {
+                    put.execute(params![id, fixed])?;
+                    fts_del.execute([id])?;
+                    if !fixed.is_empty() {
+                        fts_ins.execute(params![id, crate::cjk::index_text(&fixed)])?;
+                    }
+                }
+            }
+        }
+        set_meta(&tx, AT, last)?;
+        tx.commit()?;
+        at = last;
+    }
+    set_meta(conn, DONE, 1)?;
+    Ok(true)
 }
 
 struct Job {
@@ -473,7 +522,12 @@ pub(crate) fn strip_markup(s: &str) -> String {
                 continue;
             }
         }
-        if c == '<' {
+        // '<' opens a tag only before a name, '/', '!' or '?' ("a < b", "<5"
+        // are text in HTML).
+        let opens_tag = |i: usize| {
+            s.as_bytes().get(i + 1).is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'))
+        };
+        if c == '<' && opens_tag(i) {
             let rest = &s[i..];
             let lower: String = rest.chars().take(8).collect::<String>().to_ascii_lowercase();
             if lower.starts_with("<script") {
@@ -492,7 +546,11 @@ pub(crate) fn strip_markup(s: &str) -> String {
             }
             let close = match rest.find('>') {
                 Some(j) => j,
-                None => break,
+                // Never closed: text, not a tag swallowing the rest.
+                None => {
+                    out.push(c);
+                    continue;
+                }
             };
             let tag = &rest[1..close];
             let name = tag.trim_start_matches('/').split([' ', '/', '\t', '\n']).next().unwrap_or("");
@@ -532,7 +590,7 @@ pub(crate) fn strip_markup(s: &str) -> String {
                     "ndash" => Some('\u{2013}'),
                     "hellip" => Some('\u{2026}'),
                     "copy" => Some('\u{a9}'),
-                    e if e.starts_with("#x") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
+                    e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
                     e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
                     _ => None,
                 };
@@ -882,6 +940,56 @@ mod tests {
     }
 
     #[test]
+    fn text_read_by_an_older_lumen_gets_precomposed_once() {
+        // 0.8.1 stored a document's words as written: a Mac document holding
+        // decomposed Hangul or accents kept them so, and the file is not read
+        // again until it changes, so typed (precomposed) words never found
+        // it. The first background pass after the upgrade fixes the stored
+        // text and its index, keeping the row's history and vector.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let nfd = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af} \u{1106}\u{116e}\u{11ab}\u{1109}\u{1165} Cre\u{301}me";
+        std::fs::write(home.join("notes.txt"), nfd).unwrap();
+        let index = Index::open(dir.path().join("i.db")).unwrap();
+        let cfg = crate::Config { roots: vec![home.clone()], ..Default::default() };
+        crate::scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let hits = |q: &str| {
+            index.search(&crate::SearchRequest { query: q.into(), limit: 5, ..Default::default() }).unwrap().hits.len()
+        };
+        assert_eq!(hits("\u{bb38}\u{c11c}"), 1);
+        // Make it look like 0.8.1 left it.
+        {
+            let conn = index.writer().unwrap();
+            conn.execute("UPDATE content SET body = ?1", [nfd]).unwrap();
+            conn.execute("DELETE FROM content_fts", []).unwrap();
+            conn.execute("INSERT INTO content_fts(rowid, toks) SELECT id, ?1 FROM content", [crate::cjk::index_text(nfd)]).unwrap();
+            conn.execute("DELETE FROM meta WHERE key LIKE 'nfc_text%'", []).unwrap();
+            conn.execute("INSERT INTO opens(id, count, last) SELECT id, 4, 1 FROM files", []).unwrap();
+            conn.execute("INSERT INTO vectors(id, mtime, size, model, vec) SELECT id, mtime, size, 1, x'01' FROM files", []).unwrap();
+        }
+        assert_eq!(hits("\u{bb38}\u{c11c}"), 0, "set-up: old text is decomposed");
+        // A pass cut short leaves the rest for the next one.
+        let r = index_content(&index, Arc::new(AtomicBool::new(true)), |_| {}).unwrap();
+        assert!(r.cancelled);
+        let r = index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(r.read, 0, "fixed in place, not read again");
+        assert_eq!(hits("\u{bb38}\u{c11c}"), 1, "typed Hangul finds the old text");
+        assert_eq!(hits("\"\u{d55c}\u{ae00} \u{bb38}\u{c11c}\""), 1);
+        assert_eq!(hits("cr\u{e8}me"), 1);
+        let conn = index.conn();
+        let one = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(one("SELECT count(*) FROM content"), 1);
+        assert_eq!(one("SELECT count FROM opens"), 4);
+        assert_eq!(one("SELECT count(*) FROM vectors"), 1);
+        drop(conn);
+        // Idempotent.
+        index_content(&index, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert_eq!(hits("\u{bb38}\u{c11c}"), 1);
+    }
+
+    #[test]
     fn watcher_reads_a_capped_batch_and_asks_for_the_rest() {
         // A big folder of old documents moved in: the watcher reads the
         // first WATCHER_MAX_JOBS and says more are left; the rest are the
@@ -911,6 +1019,22 @@ mod tests {
         // ...the background pass does.
         let r = index_content(&index, stop, |_| {}).unwrap();
         assert_eq!((r.read, r.left), (1, false));
+    }
+
+    #[test]
+    fn markup_edge_entities_and_bare_angle_brackets() {
+        // Never panics, whatever follows '&'.
+        for x in ["&", "a&", "&#", "&#;", "&#x;", "&#xD800;", "&#99999999;", "&#x110000;", "&#-1;", "&\u{4e2d};", "&#x4e2d", "\u{4e2d}&amp"] {
+            let _ = strip_markup(x);
+        }
+        assert_eq!(strip_markup("&#xD800; &#99999999;"), "&#xD800; &#99999999;");
+        // Upper-case X is valid HTML too.
+        assert_eq!(strip_markup("&#X4E2D;&#x4e2d;"), "\u{4e2d}\u{4e2d}");
+        // A '<' that does not open a tag is text: it used to drop the rest of
+        // the page (no '>' after it) or the words up to the next tag.
+        assert_eq!(normalize(&strip_markup("<p>if a < b then stop</p><p>more words</p>")), "if a < b then stop more words");
+        assert_eq!(normalize(&strip_markup("<p>3 <5 and 1 << 2</p>")), "3 <5 and 1 << 2");
+        assert_eq!(normalize(&strip_markup("a <b and no tag after")), "a <b and no tag after");
     }
 
     #[test]
