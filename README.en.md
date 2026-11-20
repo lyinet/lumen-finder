@@ -25,6 +25,13 @@
 
 <br>
 
+## ✦ New in v0.9: every cloud drive, accents optional
+
+- **Cloud sync folders** — Dropbox, OneDrive, Google Drive, Box, Nutstore and any other sync app that lives in `~/Library/CloudStorage` are indexed; older `~/Dropbox`-style folders are labelled too. Each result carries a small badge with its service, files not downloaded to this Mac are still found, and Lumen never downloads a file to read, OCR or fingerprint it. Settings → Search powers → Cloud sync folders.
+- **`cloud:` filter** — `cloud:dropbox`, `cloud:onedrive`, `cloud:any`, `cloud:none`.
+- **Accents don't matter** — `resume` finds `Résumé.png`, `cafe` finds `Café`; pinyin and CJK search are unchanged, and existing indexes catch up in the background.
+- **Fixes** — `lumen search … | head` no longer panics with "Broken pipe"; scanned PDFs OCR'd by older versions are labelled "in image"; the first duplicate check of many huge files can be stopped.
+
 ## ✦ New in v0.8: smoother and quieter
 
 - **Search during the first scan** — after 2,000 files, "Start searching now"; the scan carries on in the background, and the done screen suggests searches made from your own files.
@@ -126,7 +133,7 @@ System folders, Library, apps, `.app` / Photos packages, `node_modules`, `.git`,
 <td valign="top">
 
 ### 🔍 Filters in one line
-`kind:pdf` `in:Downloads` `>100mb` `after:2024-03` `"exact phrase"` — mix freely.
+`kind:pdf` `in:Downloads` `cloud:dropbox` `>100mb` `after:2024-03` `"exact phrase"` — mix freely. Accents optional: `resume` finds `Résumé`.
 
 </td>
 <td valign="top">

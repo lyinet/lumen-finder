@@ -72,7 +72,8 @@ fn rows_from_before_get_precomposed_names() {
             cloud: false,
         }])
         .unwrap();
-    assert!(names(&index, "caf\u{e9}").is_empty());
+    // (Found since 0.9, accents aside, but under its decomposed name.)
+    assert_eq!(names(&index, "caf\u{e9}"), vec![CAFE_NFD.to_string()], "precondition: stored decomposed");
     let cfg = Config { roots: vec![home.clone()], ..Config::default() };
     let r = scan(&index, &cfg, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
     assert_eq!(r.files, 1);

@@ -25,6 +25,13 @@
 
 <br>
 
+## ✦ v0.9 新增：各家云盘 · 不分重音
+
+- **云盘同步文件夹** — Dropbox、OneDrive、Google Drive、Box、坚果云（新版云桥）等放在 `~/Library/CloudStorage` 的同步文件夹也会收录；`~/BaiduNetdisk`、`~/Nutstore Files` 等也标出所属云盘。每个结果带服务名小标签，没下载到本机的照样能搜到，Lumen 绝不为读取正文、OCR、查重而触发下载。设置 → 搜索能力 → 云盘同步文件夹。
+- **`cloud:` 筛选** — `cloud:dropbox` `云盘:百度网盘` `cloud:any` `cloud:none`，只看（或排除）某个云盘。
+- **不分重音** — `resume` 能找到 `Résumé.png`，`cafe` 能找到 `Café`；拼音和中文不受影响，旧索引会在后台自动补齐。
+- **修复** — `lumen search … | head` 不再报 Broken pipe；早期 OCR 过的扫描 PDF 正确标为“图中”；首次查重时比对大文件可以随时停止。
+
 ## ✦ v0.8 新增：更顺手、更安静
 
 - **首扫时就能搜** — 找到两千个文件后即可“先开始搜索”，扫描在后台继续；扫完给你几条用自己文件生成的示例搜索。
@@ -148,7 +155,7 @@
 <td valign="top">
 
 ### 🔍 一行筛选
-`kind:pdf` `类型:视频` `in:Downloads` `>100mb` `after:2024-03` `"精确短语"`，自由组合。
+`kind:pdf` `类型:视频` `in:Downloads` `cloud:dropbox` `>100mb` `after:2024-03` `"精确短语"`，自由组合。
 
 </td>
 <td valign="top">
@@ -179,11 +186,12 @@
 
 | 写法 | 含义 |
 |---|---|
-| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母；也匹配文档正文 |
+| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母；也匹配文档正文；不分重音（`resume` 找到 `Résumé`） |
 | `name:合同` | 只匹配文件名，不搜正文 |
 | `kind:pdf` `类型:音乐` | 按类型：文档 · 表格 · 演示 · PDF · 电子书 · 音乐 · 视频 · 图片 · 压缩包 · 设计 |
 | `ext:key` | 按扩展名 |
 | `in:Downloads` | 路径中包含 |
+| `cloud:dropbox` `云盘:百度网盘` | 某个云盘里的文件：`icloud` `dropbox` `onedrive` `gdrive` `box` `baidu` `nutstore`，或 `~/Library/CloudStorage` 中任一文件夹名开头；`cloud:any` 全部云盘，`cloud:none` 排除云盘 |
 | `>100mb` `<2gb` | 按大小 |
 | `after:2024-03` `before:2025` | 按修改时间 |
 | `"meeting notes"` | 精确短语 |

@@ -18,6 +18,26 @@ export function ago(ts) {
   if (s < 30 * 86400) return T.ago.d(Math.floor(s / 86400))
   return new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
+// Latin letters without accents, lower-cased, as the engine folds names
+// (lumen_core::fold); other scripts keep their marks (が stays が).
+const SPELLED = { 'ß': 'ss', 'ẞ': 'ss', 'æ': 'ae', 'Æ': 'ae', 'œ': 'oe', 'Œ': 'oe', 'ø': 'o', 'Ø': 'o', 'ł': 'l', 'Ł': 'l', 'đ': 'd', 'Đ': 'd', 'ð': 'd', 'Ð': 'd', 'þ': 'th', 'Þ': 'th', 'ı': 'i', 'ħ': 'h', 'Ħ': 'h' }
+export function fold(c) {
+  const n = c.codePointAt(0)
+  if (n >= 0x300 && n <= 0x36f) return ''
+  if (!((n >= 0xc0 && n <= 0x24f) || (n >= 0x1e00 && n <= 0x1eff))) return c.toLowerCase()
+  return SPELLED[c] ?? c.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+}
+/** The folded text, and for each of its UTF-16 units the index in `s` of
+ * the character it came from. */
+function foldMap(s) {
+  let text = ''; const from = []
+  for (let i = 0; i < s.length;) {
+    const c = String.fromCodePoint(s.codePointAt(i)), f = fold(c)
+    text += f; for (let k = 0; k < f.length; k++) from.push(i)
+    i += c.length
+  }
+  return { text, from }
+}
 export function highlight(name, terms) {
   // Matched on the plain name, escaped piece by piece: matching the escaped
   // text marked inside entities ("amp" in &amp;) and inside the <mark> tags
@@ -25,9 +45,21 @@ export function highlight(name, terms) {
   name = String(name)
   const words = terms.filter(t => !t.includes(':') && !/^[<>]/.test(t)).map(t => t.replace(/"/g, '')).filter(Boolean)
   const on = new Array(name.length).fill(false)
+  // Accents do not matter (v0.9: "resume" matches "Résumé"): match on the
+  // folded name and mark the original characters each folded one came from.
+  const { text, from } = foldMap(name)
   for (const w of words) {
-    const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-    for (const m of name.matchAll(re)) for (let i = m.index; i < m.index + m[0].length; i++) on[i] = true
+    const fw = foldMap(w).text
+    if (!fw) continue
+    for (let at = text.indexOf(fw); at !== -1; at = text.indexOf(fw, at + fw.length)) {
+      for (let i = from[at]; i < from[at + fw.length - 1] + 1; i++) on[i] = true
+    }
+  }
+  // The rest of a marked character: the second half of a surrogate pair,
+  // or an accent stored decomposed after its letter (folded to nothing).
+  for (let i = 1; i < name.length; i++) {
+    const u = name.charCodeAt(i)
+    if (on[i - 1] && !on[i] && ((u >= 0xdc00 && u <= 0xdfff) || (u >= 0x300 && u <= 0x36f))) on[i] = true
   }
   let out = '', i = 0
   while (i < name.length) {
@@ -37,6 +69,20 @@ export function highlight(name, terms) {
   return out
 }
 export const kc = k => `var(--k-${k})`
+
+/** A provider's name in the UI's language (v0.9): known services by id,
+ * any other File Provider app by its own name. */
+export const provName = p => (T.prov && T.prov[p.id]) || p.name
+/** "/Library/CloudStorage/OneDrive-Personal/Work" (under home) →
+ * "OneDrive › Work"; null for other paths. */
+export function cloudPath(rest) {
+  const m = rest.match(/^\/Library\/CloudStorage\/([^/]+)(.*)$/)
+  if (!m) return null
+  const id = m[1].toLowerCase(), base = m[1].split('-')[0]
+  const known = { dropbox: 'dropbox', onedrive: 'onedrive', googledrive: 'gdrive', box: 'box', baidunetdisk: 'baidu', baidu: 'baidu', nutstore: 'nutstore' }
+  const key = Object.keys(known).find(k => id === k || id.startsWith(k + '-') || id.startsWith(k + ' '))
+  return provName({ id: key ? known[key] : '', name: base }) + (m[2] ? ' › ' + m[2].slice(1).replaceAll('/', ' › ') : '')
+}
 
 export const ICON = {
   timeline: '<svg viewBox="0 0 24 24"><path d="M12 3v18"/><circle cx="12" cy="7" r="2"/><circle cx="12" cy="16" r="2"/><path d="M14 7h6M4 16h6"/></svg>',

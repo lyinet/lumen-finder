@@ -72,6 +72,7 @@ pub fn scan(
     let filter = cfg.filter();
     let mut writer = index.writer()?;
     precompose_names_once(&mut writer)?;
+    fold_names_once(&mut writer, &cancel)?;
     let gen = get_meta_i64(&writer, "generation")?.unwrap_or(0) + 1;
     let full = gen == 1;
 
@@ -197,7 +198,7 @@ fn precompose_names_once(conn: &mut rusqlite::Connection) -> Result<()> {
             .collect();
         let mut put = tx.prepare("UPDATE files SET name = ?2, name_py = ?3, parent = ?4 WHERE id = ?1")?;
         for (id, name, parent) in fix {
-            put.execute(rusqlite::params![id, name, crate::pinyin_key(&name), parent])?;
+            put.execute(rusqlite::params![id, name, crate::name_key(&name), parent])?;
         }
         // An older watcher could add a twin row for a file under the other
         // spelling of its path, and the user may have opened it from either.
@@ -231,6 +232,47 @@ fn precompose_names_once(conn: &mut rusqlite::Connection) -> Result<()> {
     }
     set_meta(&tx, "nfc_v1", 1)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Names with accents are found without them since 0.9: their folded
+/// spelling goes in name_py (see `crate::name_key`). A rescan does not
+/// rewrite name_py for a row it already has, so add it to older rows once,
+/// in batches committed one by one (a scan cancelled half way resumes at
+/// the next one). ASCII names never change, so only the others are read.
+fn fold_names_once(conn: &mut rusqlite::Connection, cancel: &AtomicBool) -> Result<()> {
+    const DONE: &str = "fold_v1";
+    const AT: &str = "fold_at";
+    if get_meta_i64(conn, DONE)?.is_some() {
+        return Ok(());
+    }
+    let mut at = get_meta_i64(conn, AT)?.unwrap_or(0);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let (last, rows): (Option<i64>, Vec<(i64, String, String)>) = {
+            let mut stmt = conn.prepare_cached("SELECT id, name, name_py FROM files WHERE id > ?1 ORDER BY id LIMIT 4000")?;
+            let all: Vec<(i64, String, String)> =
+                stmt.query_map([at], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+            (all.last().map(|r| r.0), all.into_iter().filter(|(_, name, _)| !name.is_ascii()).collect())
+        };
+        let Some(last) = last else { break };
+        let tx = conn.transaction()?;
+        {
+            let mut put = tx.prepare_cached("UPDATE files SET name_py = ?2 WHERE id = ?1")?;
+            for (id, name, old) in rows {
+                let key = crate::name_key(&name);
+                if key != old {
+                    put.execute(rusqlite::params![id, key])?;
+                }
+            }
+        }
+        set_meta(&tx, AT, last)?;
+        tx.commit()?;
+        at = last;
+    }
+    set_meta(conn, DONE, 1)?;
     Ok(())
 }
 

@@ -32,6 +32,9 @@ struct AppState {
     watcher: Mutex<Option<Watcher>>,
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// Stops the duplicates view's hashing (v0.9): hashing many huge
+    /// same-size files in full the first time could not be stopped.
+    dup_cancel: Mutex<Option<Arc<AtomicBool>>>,
     embedding: Arc<AtomicBool>,
     /// A scan was asked for (new settings, a drive plugged in, a rebuild)
     /// while one was running: run another when it ends, with the new config.
@@ -138,10 +141,29 @@ fn forgotten(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord
 #[tauri::command]
 async fn duplicates(state: State<'_, AppState>) -> Res<Vec<DuplicateGroup>> {
     let index = state.index.clone();
-    tauri::async_runtime::spawn_blocking(move || index.duplicates(1024 * 1024, 40))
+    // A new look replaces (and stops) the previous one.
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(old) = state.dup_cancel.lock().unwrap().replace(cancel.clone()) {
+        old.store(true, Ordering::Relaxed);
+    }
+    let stop = cancel.clone();
+    let groups = tauri::async_runtime::spawn_blocking(move || index.duplicates_cancellable(1024 * 1024, 40, &stop))
         .await
         .map_err(err)?
-        .map_err(err)
+        .map_err(err)?;
+    // Stopped: what was found is incomplete, and the UI says so instead.
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    Ok(groups)
+}
+
+/// Stop the duplicates view's hashing; finished hashes stay cached.
+#[tauri::command]
+fn cancel_duplicates(state: State<AppState>) {
+    if let Some(c) = state.dup_cancel.lock().unwrap().as_ref() {
+        c.store(true, Ordering::Relaxed);
+    }
 }
 
 #[tauri::command]
@@ -420,7 +442,7 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
         state.rebuilding.store(true, Ordering::SeqCst);
-        for slot in [&state.cancel, &state.read_cancel] {
+        for slot in [&state.cancel, &state.read_cancel, &state.dup_cancel] {
             if let Some(c) = slot.lock().unwrap().as_ref() {
                 c.store(true, Ordering::Relaxed);
             }
@@ -563,6 +585,7 @@ fn set_options(
     auto_update: Option<bool>,
     semantic: Option<bool>,
     include_icloud: Option<bool>,
+    include_cloud_storage: Option<bool>,
     pause_on_battery: Option<bool>,
 ) -> Res<Config> {
     if let Some(on) = launch_at_login {
@@ -596,6 +619,9 @@ fn set_options(
         if let Some(v) = include_icloud {
             cfg.include_icloud = v;
         }
+        if let Some(v) = include_cloud_storage {
+            cfg.include_cloud_storage = v;
+        }
         if let Some(v) = pause_on_battery {
             cfg.pause_on_battery = v;
             pace::set_pause_on_battery(v);
@@ -615,7 +641,13 @@ fn set_options(
         apply_theme(&app, &cfg.theme);
     }
     // Only the options that change what is indexed need a scan.
-    if content_search.is_some() || include_external.is_some() || include_icloud.is_some() || ocr.is_some() || semantic == Some(true) {
+    if content_search.is_some()
+        || include_external.is_some()
+        || include_icloud.is_some()
+        || include_cloud_storage.is_some()
+        || ocr.is_some()
+        || semantic == Some(true)
+    {
         run_scan_fresh(&app, &state)?;
     }
     Ok(cfg)
@@ -1079,6 +1111,7 @@ fn main() {
                 watcher: Mutex::new(None),
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
+                dup_cancel: Mutex::new(None),
                 embedding: Arc::new(AtomicBool::new(false)),
                 rescan: Arc::new(AtomicBool::new(false)),
                 reread: Arc::new(AtomicBool::new(false)),
@@ -1188,6 +1221,7 @@ fn main() {
             largest,
             forgotten,
             duplicates,
+            cancel_duplicates,
             start_scan,
             cancel_scan,
             set_roots,

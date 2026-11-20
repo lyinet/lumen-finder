@@ -124,3 +124,56 @@ fn a_non_utf8_argument_does_not_panic() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_closed_pipe_ends_quietly() {
+    // `lumen search x | head -1`: the reader goes away and the next line
+    // printed used to panic with "failed printing to stdout: Broken pipe".
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    let d = scratch("pipe");
+    for i in 0..40 {
+        std::fs::write(d.join(format!("home/report-{i}.txt")), b"x").unwrap();
+    }
+    let db = d.join("i.db");
+    assert!(lumen(&["--db", db.to_str().unwrap(), "scan", d.join("home").to_str().unwrap()]).status.success());
+    for _ in 0..3 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_lumen"))
+            .args(["--db", db.to_str().unwrap(), "search", "report"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take()); // the reader is gone before the first line
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("panicked") && !err.contains("Broken pipe"), "{err}");
+        // Ended by SIGPIPE (the shell reports 141), or done before it noticed.
+        assert!(out.status.success() || out.status.signal() == Some(13), "{:?}", out.status);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn search_ignores_accents_and_tells_the_cloud_service() {
+    let d = scratch("accents");
+    std::fs::create_dir_all(d.join("home/Dropbox")).unwrap();
+    std::fs::write(d.join("home/R\u{e9}sum\u{e9}.pdf"), b"x").unwrap();
+    std::fs::write(d.join("home/Dropbox/plan.pdf"), b"x").unwrap();
+    let db = d.join("i.db");
+    assert!(lumen(&["--db", db.to_str().unwrap(), "scan", d.join("home").to_str().unwrap()]).status.success());
+    let out = lumen(&["--db", db.to_str().unwrap(), "--json", "search", "resume"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["hits"][0]["name"], "R\u{e9}sum\u{e9}.pdf");
+    // ~/Dropbox is Dropbox's only when it is directly in the home folder.
+    let out = Command::new(env!("CARGO_BIN_EXE_lumen"))
+        .args(["--db", db.to_str().unwrap(), "search", "cloud:dropbox"])
+        .env("HOME", d.join("home"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("plan.pdf") && text.contains("(Dropbox)"), "{text}");
+    assert!(!text.contains("sum"), "{text}");
+    let _ = std::fs::remove_dir_all(&d);
+}

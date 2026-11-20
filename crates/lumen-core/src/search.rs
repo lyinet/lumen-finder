@@ -11,10 +11,14 @@
 //! after:2024-03 before:2025   modified date bounds (YYYY, YYYY-MM, YYYY-MM-DD)
 //! "exact phrase"        quoted text kept together
 //! name:合同             match the name only, never the words inside files
+//! cloud:dropbox 云盘:百度  synced by one service (icloud, dropbox, onedrive,
+//!                       gdrive, box, baidu, nutstore, or the start of any
+//!                       ~/Library/CloudStorage folder name); cloud:any, cloud:none
 //! ```
 //!
 //! Every word matches a file's name, pinyin or folder, or, for documents Lumen
-//! has read, the text inside it.
+//! has read, the text inside it. Accents do not matter in names (v0.9):
+//! "resume" finds "Résumé.png" and "café" finds "Cafe.txt".
 
 use crate::index::{FileRecord, Index};
 use crate::kind::Kind;
@@ -65,6 +69,8 @@ pub(crate) struct Parsed {
     pub kinds: Vec<Kind>,
     pub exts: Vec<String>,
     pub folders: Vec<String>,
+    /// Provider ids from cloud:… (see `config::provider_alias`).
+    pub clouds: Vec<String>,
     pub min_size: Option<i64>,
     pub max_size: Option<i64>,
     pub after: Option<i64>,
@@ -109,6 +115,10 @@ pub(crate) fn parse(q: &str) -> Parsed {
                     "in" | "folder" | "在" => {
                         // keep original case for display, LIKE is case-insensitive anyway
                         p.folders.push(tok.split_once([':', '：']).map(|x| x.1).unwrap_or(val).to_string());
+                        continue;
+                    }
+                    "cloud" | "云盘" | "雲碟" | "云" | "雲" => {
+                        p.clouds.push(crate::config::provider_alias(val));
                         continue;
                     }
                     "after" | "since" | "之后" => {
@@ -257,6 +267,57 @@ fn fts_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\0', "").replace('"', "\"\""))
 }
 
+/// `s` as literal text inside a LIKE pattern.
+fn like_lit(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            o.push('\\');
+        }
+        o.push(c);
+    }
+    o
+}
+
+/// Path patterns of the files one provider syncs (see `config::provider_of`,
+/// which this mirrors).
+fn provider_patterns(id: &str) -> Vec<String> {
+    let storage = |name: &str| {
+        let n = like_lit(name);
+        [format!("%/Library/CloudStorage/{n}/%"), format!("%/Library/CloudStorage/{n}-%"), format!("%/Library/CloudStorage/{n} %")]
+    };
+    let mut out = Vec::new();
+    if id == "icloud" || id == "any" {
+        out.push("%/Library/Mobile Documents/com~apple~CloudDocs/%".to_string());
+    }
+    if id == "any" {
+        out.push("%/Library/CloudStorage/%".to_string());
+    }
+    let home = crate::index::home().map(|h| like_lit(&h.to_string_lossy()));
+    for d in crate::config::PROVIDERS.iter().filter(|d| id == "any" || d.id == id) {
+        if id != "any" {
+            for s in d.storage {
+                out.extend(storage(s));
+            }
+        }
+        if let Some(home) = &home {
+            out.extend(d.home.iter().map(|h| format!("{home}/{}/%", like_lit(h))));
+        }
+    }
+    if out.is_empty() {
+        // Any other File Provider app, by the start of its folder's name.
+        out.push(format!("%/Library/CloudStorage/{}%", like_lit(id)));
+    }
+    out
+}
+
+fn cloud_where(id: &str) -> (String, Vec<Value>) {
+    let pats = provider_patterns(if id == "none" { "any" } else { id });
+    let any = vec!["f.path LIKE ? ESCAPE '\\'"; pats.len()].join(" OR ");
+    let sql = if id == "none" { format!("NOT ({any})") } else { format!("({any})") };
+    (sql, pats.into_iter().map(Value::Text).collect())
+}
+
 struct Where {
     sql: Vec<String>,
     args: Vec<Value>,
@@ -272,23 +333,34 @@ fn build_where(
     let terms = p.terms.iter().map(|t| (t, content)).chain(p.name_terms.iter().map(|t| (t, false)));
     for (t, content) in terms {
         let mut ors: Vec<String> = Vec::new();
-        let long = t.chars().count() >= 3;
-        // The trigram tokenizer needs three characters; shorter words (very
-        // common in Chinese: 简历, 合同) fall back to LIKE on the name.
-        if long {
-            ors.push("f.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)".into());
-            w.args.push(Value::Text(fts_quote(t)));
-        } else {
-            // Pinyin keys are plain ASCII: a word with 汉字 in it can never
-            // match one, so skip the second scan.
-            let pat = like_escape(t);
-            if t.is_ascii() {
-                ors.push("f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\'".into());
-                w.args.push(Value::Text(pat.clone()));
+        // A word with accents also matches as typed without them ("résumé"
+        // finds "resume.pdf"); names with accents carry their folded spelling
+        // in name_py, so "resume" finds "Résumé.png" (v0.9).
+        let folded = crate::fold(t);
+        let mut forms = vec![t.as_str()];
+        if crate::has_accents(t) {
+            forms.push(folded.as_str());
+        }
+        for t in forms {
+            let long = t.chars().count() >= 3;
+            // The trigram tokenizer needs three characters; shorter words (very
+            // common in Chinese: 简历, 合同) fall back to LIKE on the name.
+            if long {
+                ors.push("f.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)".into());
+                w.args.push(Value::Text(fts_quote(t)));
             } else {
-                ors.push("f.name LIKE ? ESCAPE '\\'".into());
+                // A word with 汉字 in it is never in name_py whole only when
+                // it has no Latin letters either: name_py holds pinyin and
+                // folded accented names. Skip the second scan for pure CJK.
+                let pat = like_escape(t);
+                if !t.chars().all(crate::cjk::is_cjk) {
+                    ors.push("f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\'".into());
+                    w.args.push(Value::Text(pat.clone()));
+                } else {
+                    ors.push("f.name LIKE ? ESCAPE '\\'".into());
+                }
+                w.args.push(Value::Text(pat));
             }
-            w.args.push(Value::Text(pat));
         }
         if content {
             if let Some(expr) = crate::cjk::match_expr(t) {
@@ -313,6 +385,11 @@ fn build_where(
         let marks = vec!["?"; p.exts.len()].join(",");
         w.sql.push(format!("f.ext IN ({marks})"));
         w.args.extend(p.exts.iter().map(|e| Value::Text(e.clone())));
+    }
+    for c in &p.clouds {
+        let (sql, args) = cloud_where(c);
+        w.sql.push(sql);
+        w.args.extend(args);
     }
     for folder in &p.folders {
         w.sql.push("f.parent LIKE ? ESCAPE '\\'".into());
@@ -408,18 +485,25 @@ fn ranked(
     // them made "report_final" rank as "reportfinal", which no name matches).
     let contains = like_escape(&all[0]);
     let starts = format!("{}%", &contains[1..contains.len() - 1]);
+    // The word without accents, against names without them: the folded
+    // name is name_py's part before its tab (see `crate::name_key`), so
+    // "resume" ranks "Résumé.png" as a name match, not a pinyin one.
+    let folded = like_lit(&crate::fold(&all[0]));
     let tier = if matches!(sort, Sort::Relevance) {
         args.push(Value::Text(all.join(" ")));
         args.push(Value::Text(starts));
+        args.push(Value::Text(format!("{folded}%\t%")));
         args.push(Value::Text(contains.clone()));
+        args.push(Value::Text(format!("%{folded}%\t%")));
+        args.push(Value::Text(format!("%{folded}%")));
         args.push(Value::Text(contains.clone()));
         args.push(Value::Text(contains));
         args.push(Value::Integer(crate::index::now() - 30 * 86_400));
         // A name or folder hit always outranks a match inside the text.
         "CASE
             WHEN lower(substr(f.name, 1, length(f.name) - length(f.ext) - 1)) = lower(?) THEN 0
-            WHEN f.name LIKE ? ESCAPE '\\' THEN 1
-            WHEN f.name LIKE ? ESCAPE '\\' THEN 2
+            WHEN f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\' THEN 1
+            WHEN f.name LIKE ? ESCAPE '\\' OR f.name_py LIKE ? ESCAPE '\\' OR f.name LIKE ? ESCAPE '\\' THEN 2
             WHEN f.name_py LIKE ? ESCAPE '\\' THEN 3
             WHEN f.parent LIKE ? ESCAPE '\\' THEN 4
             ELSE 5 END,
@@ -551,8 +635,8 @@ fn records_by_id(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRec
 fn add_snippets(conn: &rusqlite::Connection, hits: &mut [FileRecord], terms: &[String]) -> Result<()> {
     let mut stmt = conn.prepare_cached("SELECT body, ocr FROM content WHERE id = ?1")?;
     for h in hits.iter_mut() {
-        let name = h.name.to_lowercase();
-        if terms.iter().all(|t| name.contains(&t.to_lowercase())) {
+        let name = crate::fold(&h.name);
+        if terms.iter().all(|t| name.contains(&crate::fold(t))) {
             continue;
         }
         let row: Option<(String, bool)> = stmt.query_row([h.id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
@@ -581,6 +665,9 @@ mod tests {
         assert_eq!(p.before, Some(days_from_civil(2024, 1, 1) * 86_400));
         // unknown key stays as text
         assert_eq!(parse("foo:bar").terms, vec!["foo:bar".to_string()]);
+        let p = parse("cloud:Dropbox 云盘:百度网盘 cloud:GoogleDrive cloud:pCloud 报告");
+        assert_eq!(p.clouds, vec!["dropbox", "baidu", "gdrive", "pcloud"]);
+        assert_eq!(p.terms, vec!["报告".to_string()]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { api, isApp } from './bridge.js'
 import { T } from './i18n.js'
-import { ICON, esc, bytes, ago, highlight, kc, applyTheme, COLLECTIONS } from './common.js'
+import { ICON, esc, bytes, ago, highlight, kc, applyTheme, COLLECTIONS, provName, cloudPath } from './common.js'
 
 if (!isApp) document.body.classList.add('browser')
 
@@ -12,7 +12,7 @@ const fmt = n => Number(n).toLocaleString()
 function shortPath(p) {
   if (!state.home || !p.startsWith(state.home)) return p
   const rest = p.slice(state.home.length)
-  return rest.startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + rest.slice(45) : '~' + rest
+  return rest.startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + rest.slice(45) : cloudPath(rest) ?? '~' + rest
 }
 
 /** Count up to a number with an ease-out, like a odometer settling. */
@@ -93,8 +93,17 @@ function rowHTML(f, terms = [], i = 0, extra = '') {
     : `<div class="path"><span>${esc(shortPath(f.parent))}</span></div>`
   return `<div class="row ${f.snippet ? 'has-snip' : ''} ${vol ? 'offline' : ''}" data-path="${esc(f.path)}" data-i="${i}" style="animation-delay:${Math.min(i, 14) * 18}ms">
     <div class="tile" style="--c:${kc(f.kind)}">${ICON.k[f.kind] || ICON.k.document}<em>${esc((f.ext || '').slice(0, 4))}</em></div>
-    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${f.cloud ? `<span class="badge cloud" title="${esc(T.cloud_tip)}">${ICON.cloud}${esc(T.cloud)}</span>` : ''}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
+    <div class="txt"><div class="name">${highlight(f.name, terms)}${vol ? `<span class="badge">${ICON.drive}${esc(T.offline(vol))}</span>` : ''}${provBadge(f)}${f.score != null ? `<span class="badge rel" style="--p:${Math.round(f.score * 100)}%">${T.sem_rel(Math.round(f.score * 100))}</span>` : ''}</div>${sub}</div>
     <div class="size">${f.cloud && !f.size ? '—' : bytes(f.size)}</div><div class="date">${ago(f.mtime)}</div>${extra}</div>`
+}
+
+/** The cloud service a file is synced by (v0.9): a cloud badge with the
+ * service's name when it is not on this Mac, a quiet name tag when it is. */
+function provBadge(f) {
+  const name = f.provider ? provName(f.provider) : f.cloud ? T.cloud : ''
+  if (!name) return ''
+  if (f.cloud) return `<span class="badge cloud" title="${esc(f.provider && f.provider.id !== 'icloud' ? T.cloud_tip_p(name) : T.cloud_tip)}">${ICON.cloud}${esc(name)}</span>`
+  return `<span class="badge prov" title="${esc(T.prov_tip(name))}">${esc(name)}</span>`
 }
 
 function bindRows(container, getList) {
@@ -443,9 +452,20 @@ async function viewInsights(v) {
 // ---- duplicates
 async function viewDupes(v) {
   v.append(h(`<div class="head"><div><h1>${T.dupes_title}</h1><p>${T.dupes_sub}</p></div><div class="s" id="dupe-total"></div></div>`))
-  const sc = h(`<div class="scroll"><div class="empty" style="padding:60px"><div><div class="orb"></div><div class="big">${T.dupes_loading}</div></div></div></div>`); v.append(sc)
+  const sc = h(`<div class="scroll"><div class="empty" style="padding:60px"><div><div class="orb"></div><div class="big">${T.dupes_loading}</div><button class="btn small" id="dupe-stop" style="margin-top:14px">${T.dupes_stop}</button></div></div></div>`); v.append(sc)
   bindRows(sc)
-  const r = v.dataset.r, groups = await api.duplicates()
+  // The first look hashes big same-size files in full and can take minutes:
+  // Stop ends it (v0.9); fingerprints already taken are kept.
+  $('#dupe-stop', sc).onclick = () => api.cancelDuplicates()
+  const r = v.dataset.r
+  let groups
+  try { groups = await api.duplicates() } catch (e) {
+    if (state.view !== 'dupes' || v.dataset.r !== r) return
+    const stopped = String(e).includes('cancelled')
+    sc.innerHTML = `<div class="empty" style="padding:60px"><div><div class="big">${stopped ? T.dupes_stopped : esc(String(e))}</div><button class="btn small" id="dupe-again" style="margin-top:14px">${T.dupes_retry}</button></div></div>`
+    $('#dupe-again', sc).onclick = () => render()
+    return
+  }
   // Left (or left and came back) while it loaded: the page on screen is not this one.
   if (state.view !== 'dupes' || v.dataset.r !== r) return
   if (!groups.length) { sc.innerHTML = `<div class="empty" style="padding:60px"><div><div class="big">${T.dupes_none}</div></div></div>`; return }
@@ -532,6 +552,7 @@ async function viewSettings(v) {
     ${toggleRow('ocr', T.set_ocr, T.set_ocr_p, snap.config.ocr !== false)}
     ${toggleRow('semantic', T.set_semantic, T.set_semantic_p, snap.config.semantic !== false)}
     ${toggleRow('icloud', T.set_icloud, T.set_icloud_p, snap.config.include_icloud !== false)}
+    ${toggleRow('cloudstorage', T.set_cloud_storage, T.set_cloud_storage_p, snap.config.include_cloud_storage !== false)}
     ${toggleRow('external', T.set_external, T.set_external_p, snap.config.include_external !== false)}</div>`)
   form.append(feats)
   form.append(bgField(snap))
@@ -554,7 +575,7 @@ async function viewSettings(v) {
   })
   feats.querySelectorAll('.switch').forEach(sw => sw.onclick = async () => {
     const on = !sw.classList.contains('on'); sw.classList.toggle('on', on)
-    const cfg = await setOption(sw, on, { content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, icloud: { includeIcloud: on }, external: { includeExternal: on } }[sw.dataset.k]); if (!cfg) return
+    const cfg = await setOption(sw, on, { content: { contentSearch: on }, ocr: { ocr: on }, semantic: { semantic: on }, icloud: { includeIcloud: on }, cloudstorage: { includeCloudStorage: on }, external: { includeExternal: on } }[sw.dataset.k]); if (!cfg) return
     state.snapshot.config = { ...state.snapshot.config, ...cfg }; scanStarted()
   })
   const hk = h(`<div class="field"><h3>${T.set_hotkey_title}</h3><p>${T.set_shortcuts_p}</p>

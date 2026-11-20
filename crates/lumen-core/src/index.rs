@@ -137,8 +137,12 @@ pub struct FileRecord {
     pub mtime: i64,
     /// On an external drive that is not plugged in right now.
     pub offline: bool,
-    /// In iCloud Drive and not downloaded to this Mac.
+    /// In iCloud Drive or a cloud sync folder and not downloaded to this Mac.
     pub cloud: bool,
+    /// The cloud service that syncs it, from where it lies (v0.9): iCloud
+    /// Drive, Dropbox, OneDrive, Google Drive …, downloaded or not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::config::Provider>,
     /// Where the query matched inside the file, when it matched the words
     /// rather than the name.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +160,7 @@ impl FileRecord {
         Ok(FileRecord {
             id: r.get(0)?,
             offline: crate::config::volume_offline(Path::new(&path)),
+            provider: crate::config::provider_of(&path, home()),
             snippet: None,
             ocr: false,
             path,
@@ -203,7 +208,7 @@ impl NewFile {
         let ctime = meta.created().ok().map(unix).unwrap_or(mtime);
         Some(NewFile {
             path: path.to_string_lossy().into_owned(),
-            name_py: crate::pinyin_key(&name),
+            name_py: crate::name_key(&name),
             name,
             parent,
             ext,
@@ -232,8 +237,30 @@ impl NewFile {
     }
 }
 
+/// The home folder, looked up once (labels every result's provider).
+pub(crate) fn home() -> Option<&'static Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(dirs::home_dir).as_deref()
+}
+
+/// The file's bytes are on this Mac right now: it exists and is neither an
+/// iCloud placeholder nor a dataless cloud file. Every path that opens a
+/// file's contents in the background (text, OCR, duplicate hashes) asks this
+/// first, at the moment of reading: the index's `cloud` flag can be older
+/// than an eviction ("Remove Download", Optimize Storage, a File Provider
+/// freeing space), and opening a dataless file makes macOS download it.
+/// Looking at the metadata never does.
+pub fn is_local(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && !is_cloud(path, &meta),
+        Err(_) => false,
+    }
+}
+
 /// Not downloaded from iCloud: a ".name.icloud" placeholder (macOS 13 and
-/// earlier) or a dataless file (macOS 14+, SF_DATALESS). Reading one would
+/// earlier) or a dataless file (macOS 14+, SF_DATALESS; also every File
+/// Provider sync folder in ~/Library/CloudStorage: Dropbox, OneDrive,
+/// Google Drive …). Reading one would
 /// make macOS download it, so Lumen never opens these.
 pub fn is_cloud(path: &Path, meta: &std::fs::Metadata) -> bool {
     is_dataless(meta)
@@ -412,6 +439,8 @@ impl Index {
         for (name, py) in rows.flatten() {
             let stem = name.rsplit_once('.').map(|x| x.0).unwrap_or(&name);
             let n = stem.chars().count();
+            // (After the folded name of an accented one, see `crate::name_key`.)
+            let py = py.rsplit_once('\t').map(|(_, p)| p).unwrap_or(&py);
             let initials = py.rsplit(' ').next().unwrap_or("");
             if !(3..=8).contains(&n) || !(3..=6).contains(&initials.len()) || !initials.chars().all(|c| c.is_ascii_lowercase()) {
                 continue;

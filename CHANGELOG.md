@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased — bug fixes
+## v0.9.0
 
-No new features. Ten rounds of test → fix → retest (about 75 fixes, tests 30 → 93). Highlights:
+Cloud sync folders, accent-insensitive names, and the bug-fix rounds since 0.8.1.
+
+- **Cloud sync folders**: every folder in `~/Library/CloudStorage` (where macOS 12.3+ keeps File Provider apps: Dropbox, OneDrive, Google Drive, Box, Nutstore's new 云桥, and any other) is scanned as its own root while the rest of ~/Library stays skipped (Settings → Search powers → Cloud sync folders, `include_cloud_storage`, on by default). Live updates follow them like any root.
+- **Provider badges**: every result in iCloud Drive or a sync folder carries its service (`provider: { id, name }` on each record), worked out from where it lies: iCloud Drive, `~/Library/CloudStorage/<Service>…`, or a known client's own folder in home (`~/Dropbox`, `~/OneDrive`, `~/Google Drive`, `~/Box`, `~/BaiduNetdisk` for 百度网盘, `~/Nutstore Files` for 坚果云). Not downloaded: a cloud badge with the service's name; downloaded: a quiet name tag. Paths read "Dropbox › 工作" instead of `~/Library/CloudStorage/…`. CLI and Alfred name the service too. No schema change.
+- **`cloud:` filter**: `cloud:dropbox`, `cloud:onedrive`, `cloud:gdrive`, `cloud:box`, `cloud:icloud`, `cloud:baidu` (`云盘:百度网盘`), `cloud:nutstore` (`云盘:坚果云`), the start of any other CloudStorage folder name (`cloud:pcloud`), `cloud:any`, `cloud:none`.
+- **Never downloads to read**: files not on this Mac (dataless File Provider files, iCloud placeholders) were already skipped by the index's `cloud` flag; now every background read (text, OCR, duplicate fingerprints and full hashes) also checks the file itself right before opening it, so a file evicted since the last scan is not pulled back down. `lumen_core::content::extract` refuses such files.
+- **Accents don't matter in names**: `resume` finds `Résumé.png`, `cafe` finds `Café` (also stored decomposed), `strasse` finds `Straße`, and `résumé` finds `resume.pdf`. Only Latin letters are folded: kana, Hangul and Chinese keep every mark, pinyin is unchanged. Folded names live in `files.name_py` before the pinyin; a one-time background migration (`fold_v1`, batched and resumable, run by the next scan) adds them to existing indexes. Accented names rank as name matches, and highlighting maps back to the original characters.
+- **Fixes**: `lumen … | head` ends quietly (SIGPIPE, status 141) instead of panicking with "Broken pipe"; scanned PDFs OCR'd before `content.ocr` existed are found and labelled "in image" once (`ocr_flag_v1`: re-parses only the PDF text layer, never OCRs again, background pace, resumable); the first full hashing of many huge same-size files can be stopped (duplicates view → Stop; `Index::duplicates_cancellable`; finished hashes stay cached; Rebuild stops it too).
+
+Bug-fix rounds since 0.8.1 — ten rounds of test → fix → retest (about 75 fixes, tests 30 → 93). Highlights:
 
 - **Index safety**: no text or vectors landing on the wrong file after a rebuild; deleted, unreadable, ejected and symlinked roots handled correctly; overlapping roots indexed once; permission errors never delete files from the index.
 - **Unicode**: file names, folders, text and queries normalized (NFC), so accented and Korean names are found whichever form macOS reports; existing indexes migrate in the background.

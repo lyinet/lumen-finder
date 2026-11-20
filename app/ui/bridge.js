@@ -24,6 +24,7 @@ function realBridge() {
     largest: limit => invoke('largest', { limit }),
     forgotten: limit => invoke('forgotten', { limit }),
     duplicates: () => invoke('duplicates'),
+    cancelDuplicates: () => invoke('cancel_duplicates'),
     startScan: () => invoke('start_scan'),
     cancelScan: () => invoke('cancel_scan'),
     setRoots: roots => invoke('set_roots', { roots }),
@@ -116,7 +117,14 @@ function mockBridge() {
   // iCloud Drive files that are not downloaded (v0.7): kept, never read.
   for (const [name, kind, ext] of [['季度预算-终版', 'spreadsheet', 'numbers'], ['2025 家庭旅行照片', 'archive', 'zip'], ['年终总结-定稿', 'presentation', 'key']]) {
     const parent = `${HOME}/Library/Mobile Documents/com~apple~CloudDocs/工作`
-    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 0, mtime: now - 86400 * 21, cloud: true })
+    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: 0, mtime: now - 86400 * 21, cloud: true, provider: { id: 'icloud', name: 'iCloud' } })
+  }
+  // Cloud sync folders (v0.9): Dropbox, OneDrive, Google Drive, downloaded or not.
+  for (const [name, kind, ext, folder, id, pname, cloud] of [
+    ['Résumé 2025', 'pdf', 'pdf', 'Dropbox/求职', 'dropbox', 'Dropbox', false], ['Café menu', 'image', 'png', 'Dropbox/设计', 'dropbox', 'Dropbox', true],
+    ['合同模板', 'document', 'docx', 'OneDrive-Personal/工作', 'onedrive', 'OneDrive', true], ['Team roadmap', 'presentation', 'pptx', 'GoogleDrive-lin@gmail.com/My Drive', 'gdrive', 'Google Drive', false]]) {
+    const parent = `${HOME}/Library/CloudStorage/${folder}`
+    files.push({ id: files.length + 1, name: `${name}.${ext}`, parent, path: `${parent}/${name}.${ext}`, ext, kind, size: cloud ? 0 : 420000, mtime: now - 86400 * 9, cloud, provider: { id, name: pname } })
   }
   // A few files that only match by meaning, for the v0.6 preview.
   for (const [name, kind, ext, folder, days] of [
@@ -129,6 +137,7 @@ function mockBridge() {
   let scanned = !location.hash.includes('first'), scanning = false
   let paused = location.hash.includes('paused')
   let fdaChecks = 0
+  let dupStop = false
   const listeners = {}
   const COLS = [['invoices', /发票|invoice|收据/i], ['contracts', /合同|协议|contract/i], ['ids', /证件|护照|passport|身份证/i], ['screenshots', /^(Screenshot|截屏)/], ['resumes', /简历|resume/i]]
   const opts = { excluded_names: ['node_modules', '.git', 'Caches', '*.log'], pause_on_battery: true, content_search: true, ocr: true, include_external: true, hotkey: 'Alt+Space', quick_panel: true, launch_at_login: false, theme: 'auto', semantic: true }
@@ -212,8 +221,11 @@ function mockBridge() {
     recent: async n => [...files].sort((a, b) => b.mtime - a.mtime).slice(0, n || 40),
     largest: async n => [...files].sort((a, b) => b.size - a.size).slice(0, n || 40),
     forgotten: async n => files.filter(f => f.mtime < now - 2 * 365 * 86400 && f.size > 5e7).sort((a, b) => b.size - a.size).slice(0, n || 40),
+    cancelDuplicates: async () => { dupStop = true },
     duplicates: async () => {
-      await new Promise(r => setTimeout(r, 900))
+      dupStop = false
+      await new Promise(r => setTimeout(r, location.hash.includes('dupes-slow') ? 8000 : 900))
+      if (dupStop) throw 'cancelled'
       const groups = []
       for (let i = 0; i < 8; i++) {
         const f = files.filter(x => x.size > 5e7)[i * 3]
@@ -242,7 +254,7 @@ function mockBridge() {
     cancelScan: async () => {},
     trash: async paths => { await new Promise(r => setTimeout(r, 350)); return { count: paths.length, bytes: paths.length * 6.4e8 } },
     setOptions: async o => {
-      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic', includeIcloud: 'include_icloud', pauseOnBattery: 'pause_on_battery' }
+      const map = { ocr: 'ocr', contentSearch: 'content_search', includeExternal: 'include_external', quickPanel: 'quick_panel', launchAtLogin: 'launch_at_login', theme: 'theme', autoUpdate: 'auto_update', semantic: 'semantic', includeIcloud: 'include_icloud', includeCloudStorage: 'include_cloud_storage', pauseOnBattery: 'pause_on_battery' }
       for (const [k, v] of Object.entries(o)) if (map[k]) opts[map[k]] = v
       return opts
     },
