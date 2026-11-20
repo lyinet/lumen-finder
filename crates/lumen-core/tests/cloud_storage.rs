@@ -214,3 +214,25 @@ fn the_watcher_follows_cloud_storage_roots() {
     wait(0);
     drop(watcher);
 }
+
+/// One service left out by excluding its folder in Settings. Before, the
+/// folder was added as a root anyway, and a root wins over the exclusions
+/// it lies in, so the only way to drop one service was to drop all of them.
+#[test]
+fn an_excluded_sync_folder_stays_out() {
+    let (_g, home) = fresh();
+    let storage = home.join("Library/CloudStorage");
+    touch(&storage.join("Dropbox/keep.pdf"), b"keep");
+    touch(&storage.join("OneDrive-Personal/skip.pdf"), b"skip");
+    let c = Config { excluded_paths: vec![storage.join("OneDrive-Personal")], ..cfg(&home) };
+    let roots = c.effective_roots();
+    assert!(roots.contains(&storage.join("Dropbox")), "{roots:?}");
+    assert!(!roots.iter().any(|r| r.starts_with(storage.join("OneDrive-Personal"))), "{roots:?}");
+    assert!(!c.filter().allow_dir(&storage.join("OneDrive-Personal")));
+    assert!(!c.filter().allow_dir(&storage.join("OneDrive-Personal/Work")));
+
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index::open(dir.path().join("i.db")).unwrap();
+    scan(&index, &c, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+    assert_eq!(names(&index, "pdf"), vec!["keep.pdf"]);
+}

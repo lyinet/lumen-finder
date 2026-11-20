@@ -370,11 +370,16 @@ impl Config {
         if self.include_external {
             roots.extend(external_volumes(Path::new(VOLUMES)));
         }
+        // A cloud folder the user excluded ("~/Library/CloudStorage/
+        // OneDrive-Personal", picked in Settings) stays out: added here as a
+        // root, it would otherwise win over its own exclusion (see `filter`),
+        // so the only way to drop one service was to drop them all.
+        let excluded = |r: &PathBuf| self.excluded_paths.iter().any(|p| r.starts_with(p));
         if self.include_icloud {
-            roots.extend(icloud_drive().filter(|p| p.is_dir()));
+            roots.extend(icloud_drive().filter(|p| p.is_dir() && !excluded(p)));
         }
         if self.include_cloud_storage {
-            roots.extend(cloud_storage().map(|d| cloud_storage_roots(&d)).unwrap_or_default());
+            roots.extend(cloud_storage().map(|d| cloud_storage_roots(&d)).unwrap_or_default().into_iter().filter(|r| !excluded(r)));
         }
         roots.sort();
         roots.dedup();
