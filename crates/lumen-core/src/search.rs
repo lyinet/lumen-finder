@@ -311,7 +311,38 @@ fn provider_patterns(id: &str) -> Vec<String> {
     out
 }
 
+/// The characters an unknown provider's id leaves out of its folder name
+/// besides the account part (`config::provider_of` keeps letters and digits
+/// only): "pCloud Drive" is `pclouddrive`, "My.Cloud_Sync" `mycloudsync`.
+const ID_DROPS: [char; 3] = [' ', '.', '_'];
+
+/// `f.path` with `ID_DROPS` taken out, so the folder name reads as its id.
+fn path_without_drops() -> String {
+    ID_DROPS.iter().fold("f.path".to_string(), |e, c| format!("replace({e}, '{c}', '')"))
+}
+
 fn cloud_where(id: &str) -> (String, Vec<Value>) {
+    let known = matches!(id, "any" | "none" | "icloud") || crate::config::PROVIDERS.iter().any(|d| d.id == id);
+    if !known {
+        // Nothing to match by (`cloud:%`, `cloud:.`): no service is called that.
+        if !id.chars().any(char::is_alphanumeric) {
+            return ("0".into(), Vec::new());
+        }
+        // Another File Provider app, by the start of its folder's name as
+        // typed ("cloud:pcloud") or as the result's id spells it, without
+        // spaces, dots and underscores ("cloud:pclouddrive" for
+        // "pCloud Drive"; before, the id a result showed found nothing).
+        let squeezed: String = id.chars().filter(|c| !ID_DROPS.contains(c)).collect();
+        let sql = format!(
+            "(f.path LIKE ? ESCAPE '\\' OR (f.path LIKE '%/Library/CloudStorage/%' AND {} LIKE ? ESCAPE '\\'))",
+            path_without_drops()
+        );
+        let args = vec![
+            Value::Text(format!("%/Library/CloudStorage/{}%", like_lit(id))),
+            Value::Text(format!("%/Library/CloudStorage/{}%", like_lit(&squeezed))),
+        ];
+        return (sql, args);
+    }
     let pats = provider_patterns(if id == "none" { "any" } else { id });
     let any = vec!["f.path LIKE ? ESCAPE '\\'"; pats.len()].join(" OR ");
     let sql = if id == "none" { format!("NOT ({any})") } else { format!("({any})") };

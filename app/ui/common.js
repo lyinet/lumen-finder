@@ -74,12 +74,14 @@ export const kc = k => `var(--k-${k})`
  * any other File Provider app by its own name. */
 export const provName = p => (T.prov && T.prov[p.id]) || p.name
 /** "/Library/CloudStorage/OneDrive-Personal/Work" (under home) →
- * "OneDrive › Work"; null for other paths. */
+ * "OneDrive › Work"; null for other paths. Known services by the same
+ * folder names the engine knows (config::PROVIDERS), so 坚果云's folder reads
+ * "Nutstore" in English like its badge. */
 export function cloudPath(rest) {
   const m = rest.match(/^\/Library\/CloudStorage\/([^/]+)(.*)$/)
   if (!m) return null
   const id = m[1].toLowerCase(), base = m[1].split('-')[0]
-  const known = { dropbox: 'dropbox', onedrive: 'onedrive', googledrive: 'gdrive', box: 'box', baidunetdisk: 'baidu', baidu: 'baidu', nutstore: 'nutstore' }
+  const known = { dropbox: 'dropbox', onedrive: 'onedrive', googledrive: 'gdrive', box: 'box', baidunetdisk: 'baidu', baidu: 'baidu', nutstore: 'nutstore', '坚果云': 'nutstore' }
   const key = Object.keys(known).find(k => id === k || id.startsWith(k + '-') || id.startsWith(k + ' '))
   return provName({ id: key ? known[key] : '', name: base }) + (m[2] ? ' › ' + m[2].slice(1).replaceAll('/', ' › ') : '')
 }

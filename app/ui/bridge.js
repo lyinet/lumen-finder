@@ -219,8 +219,8 @@ function mockBridge() {
         added_7d: 214, changed_7d: 389, forgotten_files: 132, forgotten_bytes: 286e9 }
     },
     recent: async n => [...files].sort((a, b) => b.mtime - a.mtime).slice(0, n || 40),
-    largest: async n => [...files].sort((a, b) => b.size - a.size).slice(0, n || 40),
-    forgotten: async n => files.filter(f => f.mtime < now - 2 * 365 * 86400 && f.size > 5e7).sort((a, b) => b.size - a.size).slice(0, n || 40),
+    largest: async n => files.filter(f => !f.cloud).sort((a, b) => b.size - a.size).slice(0, n || 40),
+    forgotten: async n => files.filter(f => !f.cloud && f.mtime < now - 2 * 365 * 86400 && f.size > 5e7).sort((a, b) => b.size - a.size).slice(0, n || 40),
     cancelDuplicates: async () => { dupStop = true },
     duplicates: async () => {
       dupStop = false

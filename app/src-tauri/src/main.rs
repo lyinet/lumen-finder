@@ -588,12 +588,14 @@ fn set_options(
     include_cloud_storage: Option<bool>,
     pause_on_battery: Option<bool>,
 ) -> Res<Config> {
-    if let Some(on) = launch_at_login {
-        let al = app.autolaunch();
-        if on { al.enable() } else { al.disable() }.map_err(err)?;
-    }
+    // The changes go to a copy, which becomes the running settings only once
+    // it is saved (v0.9). Before, a failed save turned the switch back in the
+    // UI while the running settings kept the new value, and the next
+    // successful save wrote it to disk anyway. The lock is held throughout,
+    // so two changes at once cannot save over each other.
     let cfg = {
-        let mut cfg = state.config.lock().unwrap();
+        let mut running = state.config.lock().unwrap();
+        let mut cfg = running.clone();
         if let Some(v) = content_search {
             cfg.content_search = v;
         }
@@ -602,7 +604,6 @@ fn set_options(
         }
         if let Some(v) = ocr {
             cfg.ocr = v;
-            use_ocr(v);
         }
         if let Some(v) = quick_panel {
             cfg.quick_panel = v;
@@ -624,19 +625,47 @@ fn set_options(
         }
         if let Some(v) = pause_on_battery {
             cfg.pause_on_battery = v;
-            pace::set_pause_on_battery(v);
-            let _ = app.emit("pace://hold", pace::hold());
         }
         if let Some(v) = semantic {
             cfg.semantic = v;
-            use_semantic(v);
-            if !v {
-                let _ = lumen_core::semantic::clear_vectors(&state.index);
-            }
         }
-        cfg.save(&state.config_path).map_err(err)?;
-        cfg.clone()
+        // Launch at login is set before saving, so a refusal from macOS saves
+        // nothing; it is set back if the save then fails.
+        let login_before = match launch_at_login {
+            Some(on) => {
+                let al = app.autolaunch();
+                let before = al.is_enabled().unwrap_or(running.launch_at_login);
+                if on { al.enable() } else { al.disable() }.map_err(err)?;
+                Some(before)
+            }
+            None => None,
+        };
+        if let Err(e) = cfg.save(&state.config_path) {
+            if let Some(before) = login_before {
+                let al = app.autolaunch();
+                if let Err(e) = if before { al.enable() } else { al.disable() } {
+                    log::warn!("could not set launch at login back: {e}");
+                }
+            }
+            return Err(err(e));
+        }
+        *running = cfg.clone();
+        cfg
     };
+    // Saved: now the changes take effect.
+    if let Some(v) = ocr {
+        use_ocr(v);
+    }
+    if let Some(v) = pause_on_battery {
+        pace::set_pause_on_battery(v);
+        let _ = app.emit("pace://hold", pace::hold());
+    }
+    if let Some(v) = semantic {
+        use_semantic(v);
+        if !v {
+            let _ = lumen_core::semantic::clear_vectors(&state.index);
+        }
+    }
     if theme.is_some() {
         apply_theme(&app, &cfg.theme);
     }
@@ -648,7 +677,12 @@ fn set_options(
         || ocr.is_some()
         || semantic == Some(true)
     {
-        run_scan_fresh(&app, &state)?;
+        // The setting is saved and in effect: a scan that cannot start now
+        // (one already running is queued) must not report the change as
+        // failed, or the UI would turn back a switch that did change.
+        if let Err(e) = run_scan_fresh(&app, &state) {
+            log::warn!("rescan after a settings change did not start: {e}");
+        }
     }
     Ok(cfg)
 }

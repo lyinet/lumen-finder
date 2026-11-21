@@ -79,7 +79,7 @@ impl Index {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let (forgotten_files, forgotten_bytes): (i64, i64) = conn.query_row(
-                "SELECT count(*), coalesce(sum(size),0) FROM files WHERE mtime < ?1 AND size >= ?2",
+                "SELECT count(*), coalesce(sum(size),0) FROM files WHERE mtime < ?1 AND size >= ?2 AND cloud = 0",
                 params![now() - FORGOTTEN_AFTER_SECS, FORGOTTEN_MIN_SIZE],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
@@ -98,14 +98,19 @@ impl Index {
         self.records("ORDER BY f.mtime DESC LIMIT ?1", [limit as i64])
     }
 
+    /// The biggest files on this Mac. Files only in the cloud (dataless
+    /// Dropbox/OneDrive/Google Drive files keep their full size) take no
+    /// space here, and trashing one would delete it from the service, so
+    /// they are left out (v0.9), as in `forgotten` and the overview's count.
     pub fn largest(&self, limit: usize) -> Result<Vec<FileRecord>> {
-        self.records("ORDER BY f.size DESC LIMIT ?1", [limit as i64])
+        self.records("WHERE f.cloud = 0 ORDER BY f.size DESC LIMIT ?1", [limit as i64])
     }
 
-    /// Big files nobody has touched in two years.
+    /// Big files nobody has touched in two years, on this Mac (not only in
+    /// the cloud; see `largest`).
     pub fn forgotten(&self, limit: usize) -> Result<Vec<FileRecord>> {
         self.records(
-            "WHERE f.mtime < ?1 AND f.size >= ?2 ORDER BY f.size DESC LIMIT ?3",
+            "WHERE f.mtime < ?1 AND f.size >= ?2 AND f.cloud = 0 ORDER BY f.size DESC LIMIT ?3",
             params![now() - FORGOTTEN_AFTER_SECS, FORGOTTEN_MIN_SIZE, limit as i64],
         )
     }
