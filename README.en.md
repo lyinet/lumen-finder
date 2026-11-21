@@ -32,6 +32,13 @@
 - **Accents don't matter** — `resume` finds `Résumé.png`, `cafe` finds `Café`; pinyin and CJK search are unchanged, and existing indexes catch up in the background.
 - **Fixes** — `lumen search … | head` no longer panics with "Broken pipe"; scanned PDFs OCR'd by older versions are labelled "in image"; the first duplicate check of many huge files can be stopped.
 
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/cloud-folders.jpg" alt="Cloud sync folders: OneDrive › 工作 with a service badge"><p align="center"><sub><b>Cloud sync folders</b> — every result shows its service, downloaded or not</sub></p></td>
+<td width="50%"><img src="docs/screenshots/filter-help.jpg" alt="The ? filter cheat-sheet under the search bar"><p align="center"><sub><b>Filter cheat-sheet</b> — click ? in the search bar; click a row to add it</sub></p></td>
+</tr>
+</table>
+
 ## ✦ New in v0.8: smoother and quieter
 
 - **Search during the first scan** — after 2,000 files, "Start searching now"; the scan carries on in the background, and the done screen suggests searches made from your own files.

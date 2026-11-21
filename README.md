@@ -32,6 +32,13 @@
 - **不分重音** — `resume` 能找到 `Résumé.png`，`cafe` 能找到 `Café`；拼音和中文不受影响，旧索引会在后台自动补齐。
 - **修复** — `lumen search … | head` 不再报 Broken pipe；早期 OCR 过的扫描 PDF 正确标为“图中”；首次查重时比对大文件可以随时停止。
 
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/cloud-folders.jpg" alt="云盘同步文件夹：OneDrive › 工作 带服务名小标签"><p align="center"><sub><b>云盘同步文件夹</b> · 每个结果标出所属云盘，没下载的也能搜到</sub></p></td>
+<td width="50%"><img src="docs/screenshots/filter-help.jpg" alt="搜索栏 ? 打开筛选写法速查"><p align="center"><sub><b>筛选速查</b> · 搜索栏点 ?，一行一个写法，点一下加进搜索</sub></p></td>
+</tr>
+</table>
+
 ## ✦ v0.8 新增：更顺手、更安静
 
 - **首扫时就能搜** — 找到两千个文件后即可“先开始搜索”，扫描在后台继续；扫完给你几条用自己文件生成的示例搜索。
