@@ -39,6 +39,7 @@ cask "lumen-finder" do
     "~/Library/Application Support/app.lumen.desktop",
     "~/Library/Caches/app.lumen.desktop",
     "~/Library/LaunchAgents/Lumen.plist",
+    "~/Library/Logs/app.lumen.desktop",
     "~/Library/Preferences/app.lumen.desktop.plist",
     "~/Library/WebKit/app.lumen.desktop",
   ]

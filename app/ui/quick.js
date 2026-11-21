@@ -3,7 +3,7 @@
 // result in the main window, Esc (or clicking away) hides it.
 import { api, isApp } from './bridge.js'
 import { T } from './i18n.js'
-import { ICON, esc, bytes, ago, highlight, kc, applyTheme } from './common.js'
+import { ICON, esc, bytes, ago, highlight, kc, applyTheme, cloudPath } from './common.js'
 
 if (!isApp) document.body.classList.add('browser')
 const $ = s => document.querySelector(s)
@@ -13,7 +13,8 @@ let hits = [], total = 0, sel = 0, seq = 0, home = '', timer = 0
 
 q.placeholder = T.quick_ph
 const shortPath = p => !home || !p.startsWith(home) ? p
-  : p.slice(home.length).startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + p.slice(home.length + 45) : '~' + p.slice(home.length)
+  : p.slice(home.length).startsWith('/Library/Mobile Documents/com~apple~CloudDocs') ? T.icloud_drive + p.slice(home.length + 45)
+  : cloudPath(p.slice(home.length)) ?? '~' + p.slice(home.length)
 
 function row(f, terms, i) {
   const sub = f.snippet

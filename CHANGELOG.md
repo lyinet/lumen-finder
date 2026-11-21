@@ -1,8 +1,23 @@
 # Changelog
 
-## Unreleased — bug fixes
+## v0.9.0 — 2026-11-21
 
-No new features. Ten rounds of test → fix → retest (about 75 fixes, tests 30 → 93). Highlights:
+Cloud sync folders, accent-insensitive names, and the bug-fix rounds since 0.8.1.
+
+- **Cloud sync folders**: every folder in `~/Library/CloudStorage` (where macOS 12.3+ keeps File Provider apps: Dropbox, OneDrive, Google Drive, Box, Nutstore's new 云桥, and any other) is scanned as its own root while the rest of ~/Library stays skipped (Settings → Search powers → Cloud sync folders, `include_cloud_storage`, on by default). Live updates follow them like any root. To leave one service out, exclude its folder (Settings → Excluded folders).
+- **Provider badges**: every result in iCloud Drive or a sync folder carries its service (`provider: { id, name }` on each record), worked out from where it lies: iCloud Drive, `~/Library/CloudStorage/<Service>…`, or a known client's own folder in home (`~/Dropbox`, `~/OneDrive`, `~/Google Drive`, `~/Box`, `~/BaiduNetdisk` for 百度网盘, `~/Nutstore Files` for 坚果云). Not downloaded: a cloud badge with the service's name; downloaded: a quiet name tag. Paths read "Dropbox › 工作" instead of `~/Library/CloudStorage/…`. CLI and Alfred name the service too. No schema change.
+- **`cloud:` filter**: `cloud:dropbox`, `cloud:onedrive`, `cloud:gdrive`, `cloud:box`, `cloud:icloud`, `cloud:baidu` (`云盘:百度网盘`), `cloud:nutstore` (`云盘:坚果云`), the start of any other CloudStorage folder name (`cloud:pcloud`), `cloud:any`, `cloud:none`.
+- **Never downloads to read**: files not on this Mac (dataless File Provider files, iCloud placeholders) were already skipped by the index's `cloud` flag; now every background read (text, OCR, duplicate fingerprints and full hashes) also checks the file itself right before opening it, so a file evicted since the last scan is not pulled back down. `lumen_core::content::extract` refuses such files.
+- **Accents don't matter in names**: `resume` finds `Résumé.png`, `cafe` finds `Café` (also stored decomposed), `strasse` finds `Straße`, and `résumé` finds `resume.pdf`. Only Latin letters are folded: kana, Hangul and Chinese keep every mark, pinyin is unchanged. Folded names live in `files.name_py` before the pinyin; a one-time background migration (`fold_v1`, batched and resumable, run by the next scan) adds them to existing indexes. Accented names rank as name matches, and highlighting maps back to the original characters.
+- **Fixes**: `lumen … | head` ends quietly (SIGPIPE, status 141) instead of panicking with "Broken pipe"; scanned PDFs OCR'd before `content.ocr` existed are found and labelled "in image" once (`ocr_flag_v1`: re-parses only the PDF text layer, never OCRs again, background pace, resumable); the first full hashing of many huge same-size files can be stopped (duplicates view → Stop; `Index::duplicates_cancellable`; finished hashes stay cached; Rebuild stops it too).
+- **Space views are about this Mac**: Large files, Forgotten and the overview's forgotten count leave out files only in the cloud (online-only Dropbox/OneDrive/Google Drive files keep their full size, so they topped "files to clear out", and trashing one deleted it from the service). Totals, the timeline and search still include them.
+- **Every provider id is a filter**: a service Lumen does not know is named by its folder without spaces, dots or underscores (`pCloud Drive` → `pclouddrive`), and `cloud:pclouddrive` now finds its files (it found nothing). `cloud:%` or `cloud:.` matches no service instead of guessing.
+- **Sync folders added while running**: signing in to (or out of) a service adds (or removes) its folder in `~/Library/CloudStorage`; that now asks for a rescan like a drive plugged in, also when home is not a scanned folder (Lumen watches `~/Library/CloudStorage` itself then). Hidden and excluded folders are ignored.
+- **A setting that fails to save does not take effect**: a change is applied to a copy and becomes the running setting only once saved, so a failed save no longer leaves it running and written by the next save. OCR, battery pause, semantic search and launch at login change only after the save (launch at login is set back if the save fails), and a rescan that cannot start is logged instead of reporting the saved change as failed.
+- **Launch polish**: filter keys in Traditional Chinese (`類型:` `檔名:` `副檔名:` `後綴:` `資料夾:` `雲端:` `之後:`) and Traditional kind names (`影片` `圖片` `簡報` `試算表` `壓縮檔` `音訊` `文件`…); a **?** button in the search bar lists every filter; the empty search shows examples in your language; Settings → Log file → Show Log in Finder; the menu bar menu speaks Traditional Chinese and follows your first preferred language only; macOS permission prompts (Finder for Trash, Desktop, Documents, Downloads, external and network drives) explain why Lumen asks, and the app is signed with the Apple Events entitlement which the hardened runtime requires before Lumen may ask Finder to move files to the Trash (Put Back); the first-run privacy line now says plainly that Lumen goes online only to check for updates.
+- **坚果云 in English**: its sync folder's path reads "Nutstore › …" in the English UI, as its badge does, instead of "坚果云 › …".
+
+Bug-fix rounds since 0.8.1 — ten rounds of test → fix → retest (about 75 fixes, tests 30 → 93). Highlights:
 
 - **Index safety**: no text or vectors landing on the wrong file after a rebuild; deleted, unreadable, ejected and symlinked roots handled correctly; overlapping roots indexed once; permission errors never delete files from the index.
 - **Unicode**: file names, folders, text and queries normalized (NFC), so accented and Korean names are found whichever form macOS reports; existing indexes migrate in the background.
@@ -12,7 +27,7 @@ No new features. Ten rounds of test → fix → retest (about 75 fixes, tests 30
 - **App**: commands run off the main thread, scans requested mid-scan are queued, watcher stops promptly, drives that come back are rescanned, Dock/tray always show the window, events reach only the window they are for, Settings errors revert switches, collection/month views show real totals.
 - **CLI**: `scan` refuses a missing folder and stores absolute paths, `--json` prints one document, Alfred shows errors, exit codes fixed.
 
-## v0.8.1 — unreleased
+## v0.8.1 — 2026-11-18
 
 Fixes from the first real-Mac test of 0.8.0.
 

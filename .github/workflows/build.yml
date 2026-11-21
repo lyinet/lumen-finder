@@ -15,6 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A tag must match the app version, or the release ships a DMG/updater
+      # manifest under the wrong version (and an endless update prompt).
+      - name: Tag matches app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          APP=$(jq -r .version app/src-tauri/tauri.conf.json)
+          TAG=${GITHUB_REF_NAME#v}
+          [ "$TAG" = "$APP" ] || { echo "::error::tag $GITHUB_REF_NAME does not match tauri.conf.json version $APP"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -156,7 +164,7 @@ jobs:
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Lumen_universal.app.tar.gz.sig
             app/src-tauri/target/universal-apple-darwin/release/bundle/macos/latest.json
             Lumen.alfredworkflow
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           generate_release_notes: true
       # Point the Homebrew cask (Casks/lumen-finder.rb, this repo is the tap)
       # at the new DMG.

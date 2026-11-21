@@ -126,7 +126,12 @@ pub fn index_content(
     if !precompose_text_once(&mut conn, &cancel)? {
         return Ok(ContentReport { read: 0, with_text: 0, failed: 0, elapsed_ms: 0, cancelled: true, left: false });
     }
-    index_pending(&mut conn, &cancel, true, on_progress)
+    let mut report = index_pending(&mut conn, &cancel, true, on_progress)?;
+    // After the reading: new and changed documents do not wait for it.
+    if !report.cancelled && !mark_ocr_once(&mut conn, &cancel)? {
+        report.cancelled = true;
+    }
+    Ok(report)
 }
 
 /// Text is stored precomposed since 0.8.2 (see `crate::nfc`), but a document
@@ -165,6 +170,76 @@ fn precompose_text_once(conn: &mut Connection, cancel: &AtomicBool) -> Result<bo
                         fts_ins.execute(params![id, crate::cjk::index_text(&fixed)])?;
                     }
                 }
+            }
+        }
+        set_meta(&tx, AT, last)?;
+        tx.commit()?;
+        at = last;
+    }
+    set_meta(conn, DONE, 1)?;
+    Ok(true)
+}
+
+/// `content.ocr` (0.8.3) says the words came from OCR, so a scanned PDF's
+/// match reads "in image". Text read before the column existed has it 0,
+/// and those scans said "in text" until the file changed. Work it out once
+/// without OCR: a PDF whose text layer is (nearly) empty yet whose stored
+/// text is not that layer was read by OCR. Kept cheap: a PDF that names a
+/// font has a text layer (its words were read as text) and is not parsed
+/// at all; only the rest have their text layer parsed, never OCR'd again;
+/// only files still on this Mac and unchanged since their text was read;
+/// at background pace, after the reading pass, resuming where a cancelled
+/// pass stopped. Returns false when cancelled before the end.
+fn mark_ocr_once(conn: &mut Connection, cancel: &Arc<AtomicBool>) -> Result<bool> {
+    use crate::index::{get_meta_i64, set_meta};
+    const DONE: &str = "ocr_flag_v1";
+    const AT: &str = "ocr_flag_at";
+    if get_meta_i64(conn, DONE)?.is_some() {
+        return Ok(true);
+    }
+    let mut at = get_meta_i64(conn, AT)?.unwrap_or(0);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let rows: Vec<(i64, String, String, i64, i64)> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT c.id, f.path, c.body, f.size, f.mtime FROM content c JOIN files f ON f.id = c.id
+                 WHERE c.id > ?1 AND f.ext = 'pdf' AND c.ocr = 0 AND c.body <> '' AND f.cloud = 0
+                   AND c.mtime = f.mtime AND c.size = f.size
+                 ORDER BY c.id LIMIT 32",
+            )?;
+            let rows = stmt.query_map([at], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let Some(&(last, ..)) = rows.last() else { break };
+        let mut by_ocr = Vec::new();
+        for (id, path, body, size, mtime) in rows {
+            if !crate::pace::wait(cancel) {
+                return Ok(false);
+            }
+            let p = Path::new(&path);
+            let same = std::fs::metadata(p)
+                .map(|m| m.len() as i64 == size && m.modified().ok().map(crate::index::unix) == Some(mtime))
+                .unwrap_or(false);
+            if !same || !crate::index::is_local(p) {
+                continue; // changed or gone: the next pass reads it afresh
+            }
+            let Ok(bytes) = std::fs::read(p) else { continue };
+            if bytes.windows(5).any(|w| w == b"/Font") {
+                continue;
+            }
+            // The same test the reading pass makes on the raw layer.
+            let raw = pdf_text_mem(bytes).unwrap_or_default();
+            if raw.trim().chars().count() < SCANNED_PDF_CHARS && normalize(&raw) != body {
+                by_ocr.push(id);
+            }
+        }
+        let tx = conn.transaction()?;
+        {
+            let mut put = tx.prepare_cached("UPDATE content SET ocr = 1 WHERE id = ?1")?;
+            for id in by_ocr {
+                put.execute([id])?;
             }
         }
         set_meta(&tx, AT, last)?;
@@ -277,6 +352,12 @@ pub(crate) fn index_pending(
                 if cancel.load(Ordering::Relaxed) || (paced && !crate::pace::wait(&cancel)) {
                     break;
                 }
+                // Evicted to the cloud since the index last looked (its
+                // `cloud` flag is older): never opened, and not recorded as
+                // read either, so it is read once it is back on this Mac.
+                if !crate::index::is_local(Path::new(&job.path)) {
+                    continue;
+                }
                 let (text, failed, by_ocr) = match extract_marked(Path::new(&job.path), &job.ext, &cancel) {
                     Ok((t, o)) => (t, false, o),
                     Err(_) => (None, true, false),
@@ -384,6 +465,9 @@ pub fn extract_cancellable(path: &Path, ext: &str, cancel: &AtomicBool) -> Resul
 
 /// `extract_cancellable`, plus whether the text came from OCR.
 fn extract_marked(path: &Path, ext: &str, cancel: &AtomicBool) -> Result<(Option<String>, bool)> {
+    // A file that is only in the cloud (iCloud, Dropbox, OneDrive …): opening
+    // it would make macOS download it. Lumen never does that to read words.
+    anyhow::ensure!(crate::index::is_local(path), "not downloaded to this Mac");
     let ext = ext.to_ascii_lowercase();
     let mut by_ocr = false;
     let raw = match ext.as_str() {
@@ -498,7 +582,10 @@ fn zip_xml(path: &Path, want: impl Fn(&str) -> bool) -> Result<String> {
 }
 
 fn pdf_text(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)?;
+    pdf_text_mem(std::fs::read(path)?)
+}
+
+fn pdf_text_mem(bytes: Vec<u8>) -> Result<String> {
     // pdf-extract panics on some malformed files; a bad PDF must never take
     // the indexer down with it.
     let r = std::panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&bytes));

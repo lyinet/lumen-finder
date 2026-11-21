@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="platform" src="https://img.shields.io/badge/macOS-12%2B-111?logo=apple&logoColor=white">
+  <img alt="platform" src="https://img.shields.io/badge/macOS-11%2B-111?logo=apple&logoColor=white">
   <img alt="rust" src="https://img.shields.io/badge/Rust-engine-b7410e?logo=rust&logoColor=white">
   <img alt="tauri" src="https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white">
   <img alt="sqlite" src="https://img.shields.io/badge/SQLite-FTS5-003b57?logo=sqlite&logoColor=white">
@@ -24,6 +24,20 @@
 </p>
 
 <br>
+
+## ✦ v0.9 新增：各家云盘 · 不分重音
+
+- **云盘同步文件夹** — Dropbox、OneDrive、Google Drive、Box、坚果云（新版云桥）等放在 `~/Library/CloudStorage` 的同步文件夹也会收录；`~/BaiduNetdisk`、`~/Nutstore Files` 等也标出所属云盘。每个结果带服务名小标签，没下载到本机的照样能搜到，Lumen 绝不为读取正文、OCR、查重而触发下载。设置 → 搜索能力 → 云盘同步文件夹。
+- **`cloud:` 筛选** — `cloud:dropbox` `云盘:百度网盘` `cloud:any` `cloud:none`，只看（或排除）某个云盘。
+- **不分重音** — `resume` 能找到 `Résumé.png`，`cafe` 能找到 `Café`；拼音和中文不受影响，旧索引会在后台自动补齐。
+- **修复** — `lumen search … | head` 不再报 Broken pipe；早期 OCR 过的扫描 PDF 正确标为“图中”；首次查重时比对大文件可以随时停止。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/cloud-folders.jpg" alt="云盘同步文件夹：OneDrive › 工作 带服务名小标签"><p align="center"><sub><b>云盘同步文件夹</b> · 每个结果标出所属云盘，没下载的也能搜到</sub></p></td>
+<td width="50%"><img src="docs/screenshots/filter-help.jpg" alt="搜索栏 ? 打开筛选写法速查"><p align="center"><sub><b>筛选速查</b> · 搜索栏点 ?，一行一个写法，点一下加进搜索</sub></p></td>
+</tr>
+</table>
 
 ## ✦ v0.8 新增：更顺手、更安静
 
@@ -148,7 +162,7 @@
 <td valign="top">
 
 ### 🔍 一行筛选
-`kind:pdf` `类型:视频` `in:Downloads` `>100mb` `after:2024-03` `"精确短语"`，自由组合。
+`kind:pdf` `类型:视频` `in:Downloads` `cloud:dropbox` `>100mb` `after:2024-03` `"精确短语"`，自由组合。
 
 </td>
 <td valign="top">
@@ -179,14 +193,17 @@
 
 | 写法 | 含义 |
 |---|---|
-| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母；也匹配文档正文 |
+| `合同` `hetong` `ht` | 名称或文件夹包含；拼音全拼 / 首字母；也匹配文档正文；不分重音（`resume` 找到 `Résumé`） |
 | `name:合同` | 只匹配文件名，不搜正文 |
 | `kind:pdf` `类型:音乐` | 按类型：文档 · 表格 · 演示 · PDF · 电子书 · 音乐 · 视频 · 图片 · 压缩包 · 设计 |
 | `ext:key` | 按扩展名 |
 | `in:Downloads` | 路径中包含 |
+| `cloud:dropbox` `云盘:百度网盘` | 某个云盘里的文件：`icloud` `dropbox` `onedrive` `gdrive` `box` `baidu` `nutstore`，或 `~/Library/CloudStorage` 中任一文件夹名开头；`cloud:any` 全部云盘，`cloud:none` 排除云盘 |
 | `>100mb` `<2gb` | 按大小 |
 | `after:2024-03` `before:2025` | 按修改时间 |
 | `"meeting notes"` | 精确短语 |
+
+别名：`type:` / `is:` 同 `kind:`，`folder:` 同 `in:`，`since:` 同 `after:`，`until:` 同 `before:`；繁体写法 `類型:` `檔名:` `副檔名:` `雲端:` `之後:` `之前:` 也能用。搜索框右侧的 **?** 按钮随时列出这些写法。
 
 ## ✦ 安装
 
@@ -197,19 +214,55 @@ brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder
 brew install --cask lumen-finder
 ```
 
-或从 [Releases](https://github.com/lyinet/lumen-finder/releases/latest) 下载 DMG（尚未公证，首次打开请右键 → 打开）。之后新版本会在应用内提示更新。
+或从 [Releases](https://github.com/lyinet/lumen-finder/releases/latest) 下载 DMG。它还没有经过苹果公证，第一次打开会被 macOS 拦下：到 **系统设置 → 隐私与安全性** 点 **仍要打开**（详见[常见问题](#-常见问题)）。用 Homebrew 安装没有这一步。之后新版本会在应用内提示更新。需要 macOS 11 或更高版本。
 
-**从源码构建**（约 3 分钟）
+**从源码构建**（约 5 分钟，需要 macOS 11+ 和 Xcode 命令行工具）
 
 ```bash
 xcode-select --install
 curl https://sh.rustup.rs -sSf | sh
 cargo install tauri-cli --version "^2" --locked
-
-git clone https://github.com/lyinet/lumen-finder.git && cd lumen-finder/app/src-tauri
-cargo tauri dev                                       # 开发运行
-cargo tauri build --target universal-apple-darwin     # 打包 .dmg（Apple Silicon + Intel）
+git clone https://github.com/lyinet/lumen-finder.git && cd lumen-finder
 ```
+
+App 里打包了两个辅助程序（`tauri.conf.json` 的 `externalBin`），仓库里没有现成文件：`lumen-ocr`（Swift 写的 Apple Vision 文字识别和语义向量）和 `lumen`（命令行）。先按 CI 的做法把它们编译到 `app/src-tauri/binaries/`，文件名带目标三元组。
+
+只给自己这台 Mac 用（`cargo tauri dev` 或单架构打包）：
+
+```bash
+T=$(rustc -vV | sed -n 's/^host: //p')          # aarch64-apple-darwin 或 x86_64-apple-darwin
+mkdir -p app/src-tauri/binaries
+swiftc -O -target "$(uname -m)-apple-macos11" app/ocr/main.swift -o "app/src-tauri/binaries/lumen-ocr-$T"
+cargo build --release -p lumen-cli
+cp target/release/lumen "app/src-tauri/binaries/lumen-$T"
+
+cd app/src-tauri
+cargo tauri dev                                  # 开发运行
+cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'   # 打包 .app + .dmg
+```
+
+通用版（Apple Silicon + Intel），与 `.github/workflows/build.yml` 相同：
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+mkdir -p app/src-tauri/binaries
+for arch in arm64 x86_64; do
+  swiftc -O -target $arch-apple-macos11 app/ocr/main.swift -o /tmp/lumen-ocr-$arch
+done
+lipo -create /tmp/lumen-ocr-arm64 /tmp/lumen-ocr-x86_64 -output /tmp/lumen-ocr
+for t in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo build --release -p lumen-cli --target $t
+done
+lipo -create target/aarch64-apple-darwin/release/lumen target/x86_64-apple-darwin/release/lumen -output /tmp/lumen
+for t in universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
+  cp /tmp/lumen-ocr app/src-tauri/binaries/lumen-ocr-$t
+  cp /tmp/lumen app/src-tauri/binaries/lumen-$t
+done
+cd app/src-tauri
+cargo tauri build --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+`createUpdaterArtifacts:false` 跳过应用内更新包的签名（那需要项目自己的更新私钥 `TAURI_SIGNING_PRIVATE_KEY`）。没有苹果证书时，设置 `APPLE_SIGNING_IDENTITY=-` 即可像正式版一样做临时（ad-hoc）签名。
 
 想一次扫全，请在 **系统设置 → 隐私与安全性 → 完全磁盘访问权限** 中允许 Lumen。
 
@@ -232,6 +285,53 @@ cargo run -p lumen-cli -- ask 北海道的雪景视频   # 按意思搜索（需
 cargo run -p lumen-cli -- stats
 cargo run -p lumen-cli -- dupes
 ```
+</details>
+
+## ✦ 常见问题
+
+<details>
+<summary><b>macOS 提示“无法打开 Lumen”或“Apple 无法验证”</b></summary>
+
+Lumen 还没有经过苹果公证。用 Homebrew 安装可以跳过这一步（cask 会清除下载隔离标记）。用 DMG 的话：把 Lumen 拖进“应用程序”后先打开一次，被拦下时点 **完成**，然后打开 **系统设置 → 隐私与安全性**，滚动到 **安全性**，在关于 Lumen 的提示旁点 **仍要打开**（尝试打开后约一小时内会显示），再用密码或触控 ID 确认。只需一次；之后的应用内更新会正常打开。macOS 14 及更早版本也可以按住 Control 点按 → 打开。
+</details>
+
+<details>
+<summary><b>完全磁盘访问权限：为什么需要，更新后怎么办</b></summary>
+
+没有它，macOS 会对桌面、文稿、下载、iCloud 云盘和外置硬盘逐个弹窗，部分文件夹也会漏扫。打开 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**，打开 Lumen 的开关；列表里没有 Lumen 时点 **+**（或从“应用程序”把它拖进去）。Lumen 设置里有按钮直接打开这一页，并一步步引导。
+
+由于 Lumen 还没有用 Apple Developer ID 签名，macOS 可能把更新后的 Lumen 当成一个新应用。如果更新后 Lumen 又来要权限，或者有文件夹搜不到：在完全磁盘访问权限列表里选中 Lumen，点 **–** 移除，再点 **+** 重新加入，然后重新打开 Lumen。
+</details>
+
+<details>
+<summary><b>日志在哪里？</b></summary>
+
+`~/Library/Logs/app.lumen.desktop/Lumen.log`。**设置 → 日志 → 在访达中显示日志** 会直接选中它。日志记录 Lumen 做了什么和出过的错，可能包含文件和文件夹路径，附到 Issue 之前可以先看一眼。
+</details>
+
+<details>
+<summary><b>怎样彻底卸载？</b></summary>
+
+Homebrew：`brew uninstall --zap --cask lumen-finder` 会删除应用、`lumen` 命令和下表中的全部内容。
+
+手动：先关掉 **设置 → 开机时启动**，从菜单栏退出 Lumen，把“应用程序”里的 Lumen 移到废纸篓，再删除：
+
+| 路径 | 内容 |
+|---|---|
+| `~/Library/Application Support/app.lumen.desktop` | 索引（`index.db`）和设置（`config.json`） |
+| `~/Library/Logs/app.lumen.desktop` | 日志 |
+| `~/Library/Caches/app.lumen.desktop` | 缓存 |
+| `~/Library/WebKit/app.lumen.desktop` | 网页视图数据 |
+| `~/Library/Preferences/app.lumen.desktop.plist` | macOS 偏好设置 |
+| `~/Library/LaunchAgents/Lumen.plist` | 开机启动项（仅在开启过时存在） |
+
+Lumen 从不改动你的文件，其他地方不需要清理。
+</details>
+
+<details>
+<summary><b>Lumen 会联网吗？</b></summary>
+
+只在检查更新时联网：从本仓库的 GitHub Releases 读取一个很小的 `latest.json`，只有你点了安装才会下载更新。可在 **设置 → 自动检查更新** 关闭。没有统计、没有遥测，文件和索引从不离开这台 Mac。另外，开启按意思搜索时（macOS 14+），macOS 可能从苹果下载一次本机语言模型，这是 macOS 自己的下载。
 </details>
 
 ## ✦ 架构

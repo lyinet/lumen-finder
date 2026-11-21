@@ -1,7 +1,7 @@
 //! `lumen` — the engine from a terminal. Shares the app's index by default.
 //!
 //!   lumen scan [ROOT…]          full or incremental scan
-//!   lumen search QUERY…         search (supports kind:, ext:, in:, >10mb, after:…)
+//!   lumen search QUERY…         search (supports kind:, ext:, in:, cloud:, >10mb, after:…)
 //!   lumen content               read the words inside documents (正文搜索)
 //!   lumen ask QUERY…            semantic search: find files by what they are about
 //!                               (macOS; uses the helper inside Lumen.app)
@@ -23,6 +23,7 @@ use std::sync::Arc;
 const USAGE: &str = "lumen scan [ROOT…] | content | search QUERY | ask QUERY | stats | dupes   [--db PATH] [--json | --alfred]";
 
 fn main() -> Result<()> {
+    quiet_on_closed_pipe();
     // Not `env::args()`: it panics on an argument that is not UTF-8 (a pasted
     // byte, a name from another system). macOS file names are UTF-8.
     let mut args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
@@ -122,11 +123,13 @@ fn run(mut args: Vec<String>, json: bool, alfred: bool) -> Result<()> {
             } else {
                 for h in &r.hits {
                     let tag = if h.offline {
-                        "  (offline)"
+                        "  (offline)".to_string()
                     } else if h.cloud {
-                        "  (iCloud)"
+                        format!("  ({}, not downloaded)", h.provider.as_ref().map(|p| p.name.as_str()).unwrap_or("iCloud"))
+                    } else if let Some(p) = &h.provider {
+                        format!("  ({})", p.name)
                     } else {
-                        ""
+                        String::new()
                     };
                     println!("{:<12} {:>9}  {}{tag}", h.kind.slug(), human(h.size), h.path);
                     if let Some(s) = &h.snippet {
@@ -216,7 +219,7 @@ fn print_alfred<'a>(hits: impl Iterator<Item = (&'a FileRecord, Option<&'a str>)
                 None => place,
             };
             if f.cloud {
-                sub = format!("☁ iCloud · {sub}");
+                sub = format!("☁ {} · {sub}", f.provider.as_ref().map(|p| p.name.as_str()).unwrap_or("iCloud"));
             }
             serde_json::json!({
                 "uid": f.path,
@@ -237,6 +240,20 @@ fn print_alfred<'a>(hits: impl Iterator<Item = (&'a FileRecord, Option<&'a str>)
     };
     println!("{}", serde_json::json!({ "items": items }));
     Ok(())
+}
+
+/// `lumen search x | head -1`: once the reader has what it wants it closes
+/// the pipe, and the next line printed panicked with "Broken pipe" (Rust
+/// ignores SIGPIPE, so a write fails instead). Like every Unix tool, end
+/// quietly instead: the default SIGPIPE action, exit status 141 (128 + 13)
+/// as the shell reports it, nothing on stderr.
+fn quiet_on_closed_pipe() {
+    #[cfg(unix)]
+    // SAFETY: called first thing in main, before any thread exists;
+    // restoring a signal's default action has no other effect.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 }
 
 fn take_flag(args: &mut Vec<String>, f: &str) -> bool {

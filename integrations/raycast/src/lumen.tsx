@@ -13,6 +13,7 @@ interface Hit {
   mtime: number;
   offline: boolean;
   cloud?: boolean;
+  provider?: { id: string; name: string };
   snippet?: string;
   score?: number;
 }
@@ -79,7 +80,11 @@ export function LumenSearch({ mode }: { mode: "search" | "ask" }) {
           title={h.name}
           subtitle={h.snippet ?? tilde(h.parent)}
           accessories={[
-            ...(h.cloud ? [{ icon: Icon.Cloud, tooltip: "In iCloud, not downloaded" }] : []),
+            ...(h.cloud
+              ? [{ icon: Icon.Cloud, tooltip: `In ${h.provider?.name ?? "iCloud"}, not downloaded` }]
+              : h.provider
+                ? [{ text: h.provider.name, tooltip: `Synced by ${h.provider.name}` }]
+                : []),
             ...(h.offline ? [{ icon: Icon.HardDrive, tooltip: "On a drive that is not connected" }] : []),
             ...(h.score !== undefined ? [{ text: `${Math.round(h.score * 100)}%` }] : []),
             { text: human(h.size), icon: KIND_ICON[h.kind] },

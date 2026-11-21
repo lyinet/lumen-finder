@@ -32,6 +32,9 @@ struct AppState {
     watcher: Mutex<Option<Watcher>>,
     reading: Arc<AtomicBool>,
     read_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// Stops the duplicates view's hashing (v0.9): hashing many huge
+    /// same-size files in full the first time could not be stopped.
+    dup_cancel: Mutex<Option<Arc<AtomicBool>>>,
     embedding: Arc<AtomicBool>,
     /// A scan was asked for (new settings, a drive plugged in, a rebuild)
     /// while one was running: run another when it ends, with the new config.
@@ -138,10 +141,29 @@ fn forgotten(state: State<AppState>, limit: Option<usize>) -> Res<Vec<FileRecord
 #[tauri::command]
 async fn duplicates(state: State<'_, AppState>) -> Res<Vec<DuplicateGroup>> {
     let index = state.index.clone();
-    tauri::async_runtime::spawn_blocking(move || index.duplicates(1024 * 1024, 40))
+    // A new look replaces (and stops) the previous one.
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(old) = state.dup_cancel.lock().unwrap().replace(cancel.clone()) {
+        old.store(true, Ordering::Relaxed);
+    }
+    let stop = cancel.clone();
+    let groups = tauri::async_runtime::spawn_blocking(move || index.duplicates_cancellable(1024 * 1024, 40, &stop))
         .await
         .map_err(err)?
-        .map_err(err)
+        .map_err(err)?;
+    // Stopped: what was found is incomplete, and the UI says so instead.
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    Ok(groups)
+}
+
+/// Stop the duplicates view's hashing; finished hashes stay cached.
+#[tauri::command]
+fn cancel_duplicates(state: State<AppState>) {
+    if let Some(c) = state.dup_cancel.lock().unwrap().as_ref() {
+        c.store(true, Ordering::Relaxed);
+    }
 }
 
 #[tauri::command]
@@ -420,7 +442,7 @@ async fn rebuild_index(app: AppHandle) -> Res<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
         state.rebuilding.store(true, Ordering::SeqCst);
-        for slot in [&state.cancel, &state.read_cancel] {
+        for slot in [&state.cancel, &state.read_cancel, &state.dup_cancel] {
             if let Some(c) = slot.lock().unwrap().as_ref() {
                 c.store(true, Ordering::Relaxed);
             }
@@ -563,14 +585,17 @@ fn set_options(
     auto_update: Option<bool>,
     semantic: Option<bool>,
     include_icloud: Option<bool>,
+    include_cloud_storage: Option<bool>,
     pause_on_battery: Option<bool>,
 ) -> Res<Config> {
-    if let Some(on) = launch_at_login {
-        let al = app.autolaunch();
-        if on { al.enable() } else { al.disable() }.map_err(err)?;
-    }
+    // The changes go to a copy, which becomes the running settings only once
+    // it is saved (v0.9). Before, a failed save turned the switch back in the
+    // UI while the running settings kept the new value, and the next
+    // successful save wrote it to disk anyway. The lock is held throughout,
+    // so two changes at once cannot save over each other.
     let cfg = {
-        let mut cfg = state.config.lock().unwrap();
+        let mut running = state.config.lock().unwrap();
+        let mut cfg = running.clone();
         if let Some(v) = content_search {
             cfg.content_search = v;
         }
@@ -579,7 +604,6 @@ fn set_options(
         }
         if let Some(v) = ocr {
             cfg.ocr = v;
-            use_ocr(v);
         }
         if let Some(v) = quick_panel {
             cfg.quick_panel = v;
@@ -596,27 +620,69 @@ fn set_options(
         if let Some(v) = include_icloud {
             cfg.include_icloud = v;
         }
+        if let Some(v) = include_cloud_storage {
+            cfg.include_cloud_storage = v;
+        }
         if let Some(v) = pause_on_battery {
             cfg.pause_on_battery = v;
-            pace::set_pause_on_battery(v);
-            let _ = app.emit("pace://hold", pace::hold());
         }
         if let Some(v) = semantic {
             cfg.semantic = v;
-            use_semantic(v);
-            if !v {
-                let _ = lumen_core::semantic::clear_vectors(&state.index);
-            }
         }
-        cfg.save(&state.config_path).map_err(err)?;
-        cfg.clone()
+        // Launch at login is set before saving, so a refusal from macOS saves
+        // nothing; it is set back if the save then fails.
+        let login_before = match launch_at_login {
+            Some(on) => {
+                let al = app.autolaunch();
+                let before = al.is_enabled().unwrap_or(running.launch_at_login);
+                if on { al.enable() } else { al.disable() }.map_err(err)?;
+                Some(before)
+            }
+            None => None,
+        };
+        if let Err(e) = cfg.save(&state.config_path) {
+            if let Some(before) = login_before {
+                let al = app.autolaunch();
+                if let Err(e) = if before { al.enable() } else { al.disable() } {
+                    log::warn!("could not set launch at login back: {e}");
+                }
+            }
+            return Err(err(e));
+        }
+        *running = cfg.clone();
+        cfg
     };
+    // Saved: now the changes take effect.
+    if let Some(v) = ocr {
+        use_ocr(v);
+    }
+    if let Some(v) = pause_on_battery {
+        pace::set_pause_on_battery(v);
+        let _ = app.emit("pace://hold", pace::hold());
+    }
+    if let Some(v) = semantic {
+        use_semantic(v);
+        if !v {
+            let _ = lumen_core::semantic::clear_vectors(&state.index);
+        }
+    }
     if theme.is_some() {
         apply_theme(&app, &cfg.theme);
     }
     // Only the options that change what is indexed need a scan.
-    if content_search.is_some() || include_external.is_some() || include_icloud.is_some() || ocr.is_some() || semantic == Some(true) {
-        run_scan_fresh(&app, &state)?;
+    if content_search.is_some()
+        || include_external.is_some()
+        || include_icloud.is_some()
+        || include_cloud_storage.is_some()
+        || ocr.is_some()
+        || semantic == Some(true)
+    {
+        // The setting is saved and in effect: a scan that cannot start now
+        // (one already running is queued) must not report the change as
+        // failed, or the UI would turn back a switch that did change.
+        if let Err(e) = run_scan_fresh(&app, &state) {
+            log::warn!("rescan after a settings change did not start: {e}");
+        }
     }
     Ok(cfg)
 }
@@ -860,6 +926,21 @@ fn reveal_app() -> Res<()> {
     Ok(())
 }
 
+/// Lumen.log selected in Finder (~/Library/Logs/app.lumen.desktop), so a
+/// bug report can attach it. Opens the folder when there is no log yet.
+#[tauri::command]
+fn show_log(app: AppHandle) -> Res<()> {
+    let dir = app.path().app_log_dir().map_err(err)?;
+    let file = dir.join("Lumen.log");
+    if file.exists() {
+        Command::new("open").arg("-R").arg(&file).spawn().map_err(err)?;
+    } else {
+        std::fs::create_dir_all(&dir).map_err(err)?;
+        Command::new("open").arg(&dir).spawn().map_err(err)?;
+    }
+    Ok(())
+}
+
 fn app_bundle() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     Ok(exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)).unwrap_or(&exe).to_path_buf())
@@ -962,13 +1043,19 @@ fn toggle_main(app: &AppHandle) {
 
 /// The menu bar icon: click to summon, menu for the rest.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let zh = std::env::var("LANG").map(|l| l.starts_with("zh")).unwrap_or(false)
-        || sys_locale_is_zh();
-    let t = |zh_s: &'static str, en: &'static str| if zh { zh_s } else { en };
-    let show = MenuItem::with_id(app, "show", t("打开 Lumen", "Open Lumen"), true, None::<&str>)?;
-    let quick = MenuItem::with_id(app, "quick", t("快速搜索…", "Quick Search…"), true, None::<&str>)?;
-    let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "Rescan Now"), true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
+    let lang = first_preferred_language()
+        .or_else(|| std::env::var("LANG").ok())
+        .map(|l| menu_lang(&l))
+        .unwrap_or(MenuLang::En);
+    let t = |hans: &'static str, hant: &'static str, en: &'static str| match lang {
+        MenuLang::Hans => hans,
+        MenuLang::Hant => hant,
+        MenuLang::En => en,
+    };
+    let show = MenuItem::with_id(app, "show", t("打开 Lumen", "開啟 Lumen", "Open Lumen"), true, None::<&str>)?;
+    let quick = MenuItem::with_id(app, "quick", t("快速搜索…", "快速搜尋…", "Quick Search…"), true, None::<&str>)?;
+    let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "立即重新掃描", "Rescan Now"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "結束 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
     let menu = Menu::with_items(app, &[&quick, &show, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("lumen")
@@ -997,12 +1084,39 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn sys_locale_is_zh() -> bool {
-    Command::new("defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("zh"))
-        .unwrap_or(false)
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MenuLang {
+    Hans,
+    Hant,
+    En,
+}
+
+/// The menu follows the user's first preferred language only: an English
+/// Mac with Chinese further down the list gets an English menu.
+fn menu_lang(tag: &str) -> MenuLang {
+    let t = tag.trim().to_ascii_lowercase().replace('_', "-");
+    if !(t == "zh" || t.starts_with("zh-") || t.starts_with("zh.")) {
+        return MenuLang::En;
+    }
+    if t.split(['-', '.', '@']).any(|p| matches!(p, "hant" | "tw" | "hk" | "mo")) {
+        MenuLang::Hant
+    } else {
+        MenuLang::Hans
+    }
+}
+
+/// First entry of `defaults read -g AppleLanguages`, which prints
+/// `(\n    "zh-Hant-TW",\n    "en-US"\n)`.
+fn first_preferred_language() -> Option<String> {
+    let out = Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output().ok()?;
+    first_language(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn first_language(list: &str) -> Option<String> {
+    list.split(|c: char| c == ',' || c == '\n' || c == '(' || c == ')')
+        .map(|s| s.trim().trim_matches('"').trim())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn main() {
@@ -1079,6 +1193,7 @@ fn main() {
                 watcher: Mutex::new(None),
                 reading: Arc::new(AtomicBool::new(false)),
                 read_cancel: Mutex::new(None),
+                dup_cancel: Mutex::new(None),
                 embedding: Arc::new(AtomicBool::new(false)),
                 rescan: Arc::new(AtomicBool::new(false)),
                 reread: Arc::new(AtomicBool::new(false)),
@@ -1188,6 +1303,7 @@ fn main() {
             largest,
             forgotten,
             duplicates,
+            cancel_duplicates,
             start_scan,
             cancel_scan,
             set_roots,
@@ -1202,6 +1318,7 @@ fn main() {
             trash_paths,
             open_fda_settings,
             reveal_app,
+            show_log,
             full_disk_access,
             relaunch,
             quick_resize,

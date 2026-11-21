@@ -40,6 +40,11 @@ pub struct Config {
     /// Index iCloud Drive (~/Library/Mobile Documents/com~apple~CloudDocs),
     /// downloaded or not. Files not on this Mac are listed, never opened.
     pub include_icloud: bool,
+    /// Index the sync folders of cloud services (v0.9): everything under
+    /// ~/Library/CloudStorage (Dropbox, OneDrive, Google Drive, Box, and any
+    /// other File Provider app). Like iCloud Drive, files not on this Mac are
+    /// listed, never opened.
+    pub include_cloud_storage: bool,
     /// Hold background reading (text, OCR, vectors) while on battery (v0.8).
     pub pause_on_battery: bool,
 }
@@ -194,6 +199,7 @@ impl Default for Config {
             auto_update: true,
             semantic: true,
             include_icloud: true,
+            include_cloud_storage: true,
             pause_on_battery: true,
         }
     }
@@ -208,6 +214,119 @@ pub fn default_roots() -> Vec<PathBuf> {
 /// iCloud Drive's folder. It sits inside ~/Library, which is otherwise skipped.
 pub fn icloud_drive() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join("Library/Mobile Documents/com~apple~CloudDocs"))
+}
+
+/// Where macOS keeps File Provider sync folders (Dropbox, OneDrive, Google
+/// Drive, Box …) since macOS 12.3. It sits inside ~/Library, which is
+/// otherwise skipped.
+pub fn cloud_storage() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/CloudStorage"))
+}
+
+/// One folder per service and account in `dir` ("Dropbox",
+/// "OneDrive-Personal", "GoogleDrive-me@gmail.com"). Hidden entries and
+/// anything that is not a real folder are left out.
+pub fn cloud_storage_roots(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = rd
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The cloud service a file is synced by, from where it lies (v0.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Provider {
+    /// Stable id the UI translates and `cloud:` filters on ("dropbox").
+    pub id: String,
+    /// Its name as the service spells it ("Google Drive").
+    pub name: String,
+}
+
+/// A known service: its id, name, the start of its folder names in
+/// ~/Library/CloudStorage, and its older sync folders directly in home.
+pub(crate) struct ProviderDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub storage: &'static [&'static str],
+    pub home: &'static [&'static str],
+}
+
+/// The sync clients whose folders Lumen labels. Folders in home are only the
+/// clients' documented defaults; all of them are under the home root already.
+pub(crate) const PROVIDERS: &[ProviderDef] = &[
+    ProviderDef { id: "dropbox", name: "Dropbox", storage: &["Dropbox"], home: &["Dropbox"] },
+    ProviderDef { id: "onedrive", name: "OneDrive", storage: &["OneDrive"], home: &["OneDrive"] },
+    ProviderDef { id: "gdrive", name: "Google Drive", storage: &["GoogleDrive"], home: &["Google Drive"] },
+    ProviderDef { id: "box", name: "Box", storage: &["Box"], home: &["Box", "Box Sync"] },
+    // 百度网盘: ~/BaiduNetdisk is its Mac sync folder.
+    ProviderDef { id: "baidu", name: "Baidu Netdisk", storage: &["BaiduNetdisk", "Baidu"], home: &["BaiduNetdisk"] },
+    // 坚果云: "~/Nutstore Files" before 6.x; its new 云桥 is a File Provider
+    // and lives in ~/Library/CloudStorage.
+    ProviderDef { id: "nutstore", name: "Nutstore", storage: &["Nutstore", "坚果云"], home: &["Nutstore Files"] },
+];
+
+const ICLOUD_DIR: &str = "/Library/Mobile Documents/com~apple~CloudDocs/";
+const STORAGE_DIR: &str = "/Library/CloudStorage/";
+
+/// "OneDrive-Personal" is OneDrive's: the name, then nothing or a "-" or a
+/// space. Compared without case.
+fn storage_name_is(folder: &str, prefix: &str) -> bool {
+    let (f, p) = (folder.to_lowercase(), prefix.to_lowercase());
+    f == p || f.strip_prefix(&p).is_some_and(|rest| rest.starts_with(['-', ' ']))
+}
+
+/// Which service syncs `path`, if any: iCloud Drive, a folder in
+/// ~/Library/CloudStorage, or a known client's folder directly in `home`.
+pub fn provider_of(path: &str, home: Option<&Path>) -> Option<Provider> {
+    let make = |id: &str, name: &str| Some(Provider { id: id.to_string(), name: name.to_string() });
+    if path.contains(ICLOUD_DIR) {
+        return make("icloud", "iCloud");
+    }
+    if let Some(i) = path.find(STORAGE_DIR) {
+        let folder = path[i + STORAGE_DIR.len()..].split('/').next().unwrap_or("");
+        if folder.is_empty() || path.len() <= i + STORAGE_DIR.len() + folder.len() + 1 {
+            return None; // the folder itself, or nothing inside it
+        }
+        if let Some(d) = PROVIDERS.iter().find(|d| d.storage.iter().any(|p| storage_name_is(folder, p))) {
+            return make(d.id, d.name);
+        }
+        // Another File Provider app ("pCloud Drive", "SynologyDrive-home"):
+        // named as its folder is, up to the account.
+        let name = folder.split('-').next().unwrap_or(folder).trim();
+        let id: String = name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+        return (!id.is_empty()).then(|| Provider { id, name: name.to_string() });
+    }
+    let rest = Path::new(path).strip_prefix(home?).ok()?;
+    let mut comps = rest.components();
+    let first = comps.next()?.as_os_str().to_str()?;
+    comps.next()?; // a file inside it, not the folder
+    let d = PROVIDERS.iter().find(|d| d.home.contains(&first))?;
+    make(d.id, d.name)
+}
+
+/// `cloud:` values people type, to a provider id: "any" and "none" stand
+/// for every service and no service. Anything else is taken as the start of
+/// a folder name in ~/Library/CloudStorage.
+pub(crate) fn provider_alias(v: &str) -> String {
+    let v = v.to_lowercase();
+    let id = match v.as_str() {
+        "any" | "all" | "yes" | "全部" | "任意" | "是" => "any",
+        "none" | "no" | "否" | "无" | "無" => "none",
+        "icloud" | "icloud drive" | "icloud云盘" => "icloud",
+        "dropbox" => "dropbox",
+        "onedrive" => "onedrive",
+        "gdrive" | "google" | "googledrive" | "google-drive" | "google drive" | "谷歌" => "gdrive",
+        "box" => "box",
+        "baidu" | "baidunetdisk" | "百度" | "百度网盘" | "百度網盤" | "百度云" => "baidu",
+        "nutstore" | "jianguoyun" | "坚果云" | "堅果雲" => "nutstore",
+        _ => return v,
+    };
+    id.to_string()
 }
 
 impl Config {
@@ -251,8 +370,16 @@ impl Config {
         if self.include_external {
             roots.extend(external_volumes(Path::new(VOLUMES)));
         }
+        // A cloud folder the user excluded ("~/Library/CloudStorage/
+        // OneDrive-Personal", picked in Settings) stays out: added here as a
+        // root, it would otherwise win over its own exclusion (see `filter`),
+        // so the only way to drop one service was to drop them all.
+        let excluded = |r: &PathBuf| self.excluded_paths.iter().any(|p| r.starts_with(p));
         if self.include_icloud {
-            roots.extend(icloud_drive().filter(|p| p.is_dir()));
+            roots.extend(icloud_drive().filter(|p| p.is_dir() && !excluded(p)));
+        }
+        if self.include_cloud_storage {
+            roots.extend(cloud_storage().map(|d| cloud_storage_roots(&d)).unwrap_or_default().into_iter().filter(|r| !excluded(r)));
         }
         roots.sort();
         roots.dedup();
@@ -270,7 +397,7 @@ impl Config {
     pub fn filter(&self) -> PathFilter {
         let paths = self.blocked_paths();
         // A root inside a skipped location wins over it for its own subtree
-        // (iCloud Drive inside ~/Library, or someone's /opt/media), and only
+        // (iCloud Drive and ~/Library/CloudStorage/* inside ~/Library, or someone's /opt/media), and only
         // there: the rest of ~/Library stays skipped.
         let roots = self.effective_roots();
         let root_exceptions: Vec<PathBuf> =
@@ -346,7 +473,7 @@ impl PathFilter {
             .any(|e| e.eq_ignore_ascii_case(ext))
     }
 
-    /// Big enough to keep? Files still in iCloud are always kept: their
+    /// Big enough to keep? Files still in the cloud are always kept: their
     /// placeholder is tiny but the file is not.
     pub fn keep_size(&self, path: &Path, meta: &std::fs::Metadata) -> bool {
         meta.len() >= self.min_size || crate::index::is_cloud(path, meta)

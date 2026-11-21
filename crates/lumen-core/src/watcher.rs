@@ -23,7 +23,8 @@ pub struct ChangeBatch {
     pub removed: usize,
     /// Documents whose words were (re)read after this batch.
     pub content_read: u64,
-    /// A drive was plugged in or ejected: the app rescans to pick it up.
+    /// A drive was plugged in or ejected, or a sync folder appeared in or
+    /// left ~/Library/CloudStorage: the app rescans to pick it up.
     pub volumes_changed: bool,
     /// More documents arrived than one batch reads (a big folder moved in):
     /// the app starts a background reading pass for the rest.
@@ -70,6 +71,46 @@ impl DriveWatch {
     }
 }
 
+/// Sync folders coming or going in ~/Library/CloudStorage (v0.9): a service
+/// signed in to (or out of) while Lumen runs adds (or removes) a folder there,
+/// which is a new root, like a drive plugged in. Its files were never picked
+/// up until the next launch.
+pub(crate) struct StorageWatch {
+    /// ~/Library/CloudStorage, when sync folders are indexed.
+    dir: Option<PathBuf>,
+    /// Folders the user excluded: one of them appearing changes nothing.
+    excluded: Vec<PathBuf>,
+}
+
+impl StorageWatch {
+    pub(crate) fn new(cfg: &Config) -> StorageWatch {
+        let dir = if cfg.include_cloud_storage { crate::config::cloud_storage() } else { None };
+        StorageWatch { dir, excluded: cfg.excluded_paths.clone() }
+    }
+
+    /// `path` is an event's path: a folder directly in ~/Library/CloudStorage
+    /// (created, removed or renamed; hidden ones are the providers' own
+    /// bookkeeping, and excluded ones stay out anyway).
+    pub(crate) fn matters(&self, path: &std::path::Path) -> bool {
+        let Some(dir) = &self.dir else { return false };
+        if path.parent() != Some(dir.as_path()) {
+            return false;
+        }
+        let hidden = path.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
+        // Gone now (removed or renamed away), or a real folder: a file
+        // dropped next to the sync folders is not one.
+        let folder = !path.exists() || path.is_dir();
+        !hidden && folder && !self.excluded.iter().any(|e| path.starts_with(e))
+    }
+
+    /// The folder to watch for them when no root covers it already (home
+    /// not scanned, only chosen folders).
+    fn needs_own_watch(&self, roots: &[PathBuf]) -> Option<&PathBuf> {
+        let dir = self.dir.as_ref()?;
+        (dir.is_dir() && !roots.iter().any(|r| dir.starts_with(r))).then_some(dir)
+    }
+}
+
 /// How long stopping waits for a batch being written before letting the
 /// thread finish on its own (it stops at the next file).
 const STOP_WAIT: Duration = Duration::from_secs(1);
@@ -104,6 +145,12 @@ impl Watcher {
         if drives.any() && volumes.is_dir() {
             let _ = inner.watch(&volumes, RecursiveMode::NonRecursive);
         }
+        let storage = StorageWatch::new(cfg);
+        if let Some(dir) = storage.needs_own_watch(&roots) {
+            if let Err(e) = inner.watch(dir, RecursiveMode::NonRecursive) {
+                log::warn!("cannot watch {}: {e}", dir.display());
+            }
+        }
         let content = cfg.content_search;
         let filter = cfg.filter();
         let mut conn = index.writer()?;
@@ -133,7 +180,7 @@ impl Watcher {
                 }
                 let paths: Vec<PathBuf> = pending.drain().collect();
                 first = None;
-                let volumes_changed = paths.iter().any(|p| drives.matters(p));
+                let volumes_changed = paths.iter().any(|p| drives.matters(p) || storage.matters(p));
                 match apply_paths(&mut conn, &paths, &filter, &roots) {
                     Ok((upserted, removed)) if upserted + removed > 0 || volumes_changed => {
                         let (mut content_read, mut content_left) = (0, false);
