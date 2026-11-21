@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="platform" src="https://img.shields.io/badge/macOS-12%2B-111?logo=apple&logoColor=white">
+  <img alt="platform" src="https://img.shields.io/badge/macOS-11%2B-111?logo=apple&logoColor=white">
   <img alt="rust" src="https://img.shields.io/badge/Rust-engine-b7410e?logo=rust&logoColor=white">
   <img alt="tauri" src="https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white">
   <img alt="sqlite" src="https://img.shields.io/badge/SQLite-FTS5-003b57?logo=sqlite&logoColor=white">
@@ -160,32 +160,131 @@ The index never leaves your Mac. No uploads, no telemetry; the only request is a
 
 <sub>Screenshots show the UI preview with sample data.</sub>
 
+## ✦ Search syntax
+
+| Write | Means |
+|---|---|
+| `invoice` `résumé` | Name or folder contains it; also matches document text; accents optional (`resume` finds `Résumé`). Chinese names also match pinyin: `hetong` `ht` |
+| `name:invoice` | File name only, not the text inside |
+| `kind:pdf` | Type: `doc` · `sheet` · `slides` · `pdf` · `ebook` · `music` · `video` · `image` · `zip` · `design` |
+| `ext:key` | File extension |
+| `in:Downloads` | Path contains |
+| `cloud:dropbox` | Files in a cloud drive: `icloud` `dropbox` `onedrive` `gdrive` `box` `baidu` `nutstore`, or any folder name in `~/Library/CloudStorage`; `cloud:any` all of them, `cloud:none` none |
+| `>100mb` `<2gb` | Size (`kb` `mb` `gb` `tb`) |
+| `after:2024-03` `before:2025` | Modified on/after that date; up to the end of that year, month or day |
+| `"meeting notes"` | Exact phrase |
+
+Aliases: `type:` / `is:` = `kind:`, `folder:` = `in:`, `since:` = `after:`, `until:` = `before:`. Chinese keys work too: `类型:` `名:` `后缀:` `在:` `云盘:` `之后:` `之前:` (Traditional: `類型:` `檔名:` `副檔名:` `雲端:` `之後:`). The **?** button in the search bar shows this list.
+
 ## ✦ Install
 
-**Homebrew**
+**Homebrew (recommended)**
 
 ```bash
 brew tap lyinet/lumen-finder https://github.com/lyinet/lumen-finder
 brew install --cask lumen-finder
 ```
 
-Or download the DMG from [Releases](https://github.com/lyinet/lumen-finder/releases/latest) (not notarized yet: right-click → Open the first time). Later versions arrive as in-app updates.
+Or download the DMG from [Releases](https://github.com/lyinet/lumen-finder/releases/latest). It is not notarized yet, so the first time macOS blocks it: go to **System Settings → Privacy & Security** and click **Open Anyway** (details in the [FAQ](#-faq)). Homebrew avoids this step. Later versions arrive as in-app updates. Requires macOS 11 or later.
 
-**Build from source** (~3 minutes)
+**Build from source** (~5 minutes, macOS 11+, Xcode Command Line Tools)
 
 ```bash
 xcode-select --install
 curl https://sh.rustup.rs -sSf | sh
 cargo install tauri-cli --version "^2" --locked
-
-git clone https://github.com/lyinet/lumen-finder.git && cd lumen-finder/app/src-tauri
-cargo tauri dev                                       # run
-cargo tauri build --target universal-apple-darwin     # .dmg for Apple Silicon + Intel
+git clone https://github.com/lyinet/lumen-finder.git && cd lumen-finder
 ```
+
+The app bundles two helper binaries (`externalBin` in `tauri.conf.json`) that are not in the repo: `lumen-ocr` (Apple Vision OCR and sentence embeddings, Swift) and `lumen` (the CLI). Build them into `app/src-tauri/binaries/` first, named with the target triple, exactly as CI does.
+
+For your own Mac (`cargo tauri dev` or a single-architecture build):
+
+```bash
+T=$(rustc -vV | sed -n 's/^host: //p')          # aarch64-apple-darwin or x86_64-apple-darwin
+mkdir -p app/src-tauri/binaries
+swiftc -O -target "$(uname -m)-apple-macos11" app/ocr/main.swift -o "app/src-tauri/binaries/lumen-ocr-$T"
+cargo build --release -p lumen-cli
+cp target/release/lumen "app/src-tauri/binaries/lumen-$T"
+
+cd app/src-tauri
+cargo tauri dev                                  # run
+cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'   # .app + .dmg
+```
+
+Universal build (Apple Silicon + Intel), as in `.github/workflows/build.yml`:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+mkdir -p app/src-tauri/binaries
+for arch in arm64 x86_64; do
+  swiftc -O -target $arch-apple-macos11 app/ocr/main.swift -o /tmp/lumen-ocr-$arch
+done
+lipo -create /tmp/lumen-ocr-arm64 /tmp/lumen-ocr-x86_64 -output /tmp/lumen-ocr
+for t in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo build --release -p lumen-cli --target $t
+done
+lipo -create target/aarch64-apple-darwin/release/lumen target/x86_64-apple-darwin/release/lumen -output /tmp/lumen
+for t in universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
+  cp /tmp/lumen-ocr app/src-tauri/binaries/lumen-ocr-$t
+  cp /tmp/lumen app/src-tauri/binaries/lumen-$t
+done
+cd app/src-tauri
+cargo tauri build --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+`createUpdaterArtifacts:false` skips the signed update archive, which needs the project's private updater key (`TAURI_SIGNING_PRIVATE_KEY`). Without an Apple certificate, set `APPLE_SIGNING_IDENTITY=-` for an ad-hoc signature like the released builds.
 
 To index everything, allow Lumen under **System Settings → Privacy & Security → Full Disk Access**.
 
 Preview the UI without Rust: `cd app/ui && python3 -m http.server 8765`, then open `http://localhost:8765/#first`.
+
+## ✦ FAQ
+
+<details>
+<summary><b>macOS says Lumen “can’t be opened” or “Apple could not verify” it</b></summary>
+
+Lumen is not notarized by Apple yet. Install with Homebrew to skip this (the cask clears the download quarantine). With the DMG: drag Lumen to Applications and open it once. When macOS refuses, click **Done**, then open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to the message about Lumen (it appears for about an hour after you tried). Confirm with your password or Touch ID. You only do this once; in-app updates open normally. On macOS 14 and earlier, Control-click → Open also works.
+</details>
+
+<details>
+<summary><b>Full Disk Access: why, and what to do after an update</b></summary>
+
+Without it, macOS asks separately for Desktop, Documents, Downloads, iCloud Drive and removable drives, and some folders are skipped. Open **System Settings → Privacy & Security → Full Disk Access** and turn Lumen on; if Lumen is not in the list, click **+** (or drag it in from Applications). Lumen’s Settings has a button that opens this page and a guide.
+
+Because Lumen is not signed with an Apple Developer ID yet, macOS may treat an updated Lumen as a new app. If Lumen asks for access again after an update, or folders are missing, select Lumen in the Full Disk Access list, remove it with **–**, add it again with **+**, and reopen Lumen.
+</details>
+
+<details>
+<summary><b>Where are the logs?</b></summary>
+
+`~/Library/Logs/app.lumen.desktop/Lumen.log`. **Settings → Log file → Show Log in Finder** selects it for you. It records what Lumen did and any errors, and can include file and folder paths, so look it over before attaching it to an issue.
+</details>
+
+<details>
+<summary><b>How do I uninstall Lumen completely?</b></summary>
+
+Homebrew: `brew uninstall --zap --cask lumen-finder` removes the app, the `lumen` command and everything below.
+
+By hand: turn off **Settings → Open at login**, quit Lumen from the menu bar, move Lumen from Applications to the Trash, then delete:
+
+| Path | What |
+|---|---|
+| `~/Library/Application Support/app.lumen.desktop` | index (`index.db`) and settings (`config.json`) |
+| `~/Library/Logs/app.lumen.desktop` | log |
+| `~/Library/Caches/app.lumen.desktop` | caches |
+| `~/Library/WebKit/app.lumen.desktop` | web view data |
+| `~/Library/Preferences/app.lumen.desktop.plist` | macOS preferences |
+| `~/Library/LaunchAgents/Lumen.plist` | open-at-login entry (only if it was on) |
+
+Lumen never changes your files, so nothing else needs cleaning up.
+</details>
+
+<details>
+<summary><b>Does Lumen use the network?</b></summary>
+
+Only to check for updates: it reads a small `latest.json` from this repository’s GitHub Releases, and downloads an update only when you click Install. Turn it off under **Settings → Check for updates**. No telemetry, no analytics, and your files and index never leave the Mac. Separately, when search by meaning is on (macOS 14+), macOS may download Apple’s on-device language model once; that download comes from macOS itself.
+</details>
 
 ## ✦ Architecture
 

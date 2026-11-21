@@ -59,16 +59,16 @@ impl Kind {
     pub fn parse(s: &str) -> Option<Kind> {
         let s = s.to_lowercase();
         Some(match s.as_str() {
-            "document" | "doc" | "docs" | "text" | "文档" => Kind::Document,
-            "spreadsheet" | "sheet" | "xls" | "表格" => Kind::Spreadsheet,
-            "presentation" | "slides" | "ppt" | "keynote" | "幻灯片" | "演示" => Kind::Presentation,
+            "document" | "doc" | "docs" | "text" | "文档" | "文件" => Kind::Document,
+            "spreadsheet" | "sheet" | "xls" | "表格" | "試算表" => Kind::Spreadsheet,
+            "presentation" | "slides" | "ppt" | "keynote" | "幻灯片" | "演示" | "簡報" | "投影片" => Kind::Presentation,
             "pdf" => Kind::Pdf,
-            "ebook" | "book" | "books" | "电子书" | "书" => Kind::Ebook,
-            "audio" | "music" | "song" | "songs" | "音乐" | "音频" => Kind::Audio,
-            "video" | "videos" | "movie" | "movies" | "视频" | "电影" => Kind::Video,
-            "image" | "images" | "photo" | "photos" | "picture" | "图片" | "照片" => Kind::Image,
-            "archive" | "zip" | "压缩包" => Kind::Archive,
-            "design" | "设计" => Kind::Design,
+            "ebook" | "book" | "books" | "电子书" | "书" | "電子書" | "書" => Kind::Ebook,
+            "audio" | "music" | "song" | "songs" | "音乐" | "音频" | "音樂" | "音訊" => Kind::Audio,
+            "video" | "videos" | "movie" | "movies" | "视频" | "电影" | "影片" | "視頻" | "電影" => Kind::Video,
+            "image" | "images" | "photo" | "photos" | "picture" | "图片" | "照片" | "圖片" | "相片" => Kind::Image,
+            "archive" | "zip" | "压缩包" | "壓縮包" | "壓縮檔" => Kind::Archive,
+            "design" | "设计" | "設計" => Kind::Design,
             _ => return None,
         })
     }

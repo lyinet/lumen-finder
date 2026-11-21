@@ -926,6 +926,21 @@ fn reveal_app() -> Res<()> {
     Ok(())
 }
 
+/// Lumen.log selected in Finder (~/Library/Logs/app.lumen.desktop), so a
+/// bug report can attach it. Opens the folder when there is no log yet.
+#[tauri::command]
+fn show_log(app: AppHandle) -> Res<()> {
+    let dir = app.path().app_log_dir().map_err(err)?;
+    let file = dir.join("Lumen.log");
+    if file.exists() {
+        Command::new("open").arg("-R").arg(&file).spawn().map_err(err)?;
+    } else {
+        std::fs::create_dir_all(&dir).map_err(err)?;
+        Command::new("open").arg(&dir).spawn().map_err(err)?;
+    }
+    Ok(())
+}
+
 fn app_bundle() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     Ok(exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)).unwrap_or(&exe).to_path_buf())
@@ -1028,13 +1043,19 @@ fn toggle_main(app: &AppHandle) {
 
 /// The menu bar icon: click to summon, menu for the rest.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let zh = std::env::var("LANG").map(|l| l.starts_with("zh")).unwrap_or(false)
-        || sys_locale_is_zh();
-    let t = |zh_s: &'static str, en: &'static str| if zh { zh_s } else { en };
-    let show = MenuItem::with_id(app, "show", t("打开 Lumen", "Open Lumen"), true, None::<&str>)?;
-    let quick = MenuItem::with_id(app, "quick", t("快速搜索…", "Quick Search…"), true, None::<&str>)?;
-    let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "Rescan Now"), true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
+    let lang = first_preferred_language()
+        .or_else(|| std::env::var("LANG").ok())
+        .map(|l| menu_lang(&l))
+        .unwrap_or(MenuLang::En);
+    let t = |hans: &'static str, hant: &'static str, en: &'static str| match lang {
+        MenuLang::Hans => hans,
+        MenuLang::Hant => hant,
+        MenuLang::En => en,
+    };
+    let show = MenuItem::with_id(app, "show", t("打开 Lumen", "開啟 Lumen", "Open Lumen"), true, None::<&str>)?;
+    let quick = MenuItem::with_id(app, "quick", t("快速搜索…", "快速搜尋…", "Quick Search…"), true, None::<&str>)?;
+    let rescan = MenuItem::with_id(app, "rescan", t("立即重新扫描", "立即重新掃描", "Rescan Now"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t("退出 Lumen", "結束 Lumen", "Quit Lumen"), true, Some("CmdOrCtrl+Q"))?;
     let menu = Menu::with_items(app, &[&quick, &show, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("lumen")
@@ -1063,12 +1084,39 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn sys_locale_is_zh() -> bool {
-    Command::new("defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("zh"))
-        .unwrap_or(false)
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MenuLang {
+    Hans,
+    Hant,
+    En,
+}
+
+/// The menu follows the user's first preferred language only: an English
+/// Mac with Chinese further down the list gets an English menu.
+fn menu_lang(tag: &str) -> MenuLang {
+    let t = tag.trim().to_ascii_lowercase().replace('_', "-");
+    if !(t == "zh" || t.starts_with("zh-") || t.starts_with("zh.")) {
+        return MenuLang::En;
+    }
+    if t.split(['-', '.', '@']).any(|p| matches!(p, "hant" | "tw" | "hk" | "mo")) {
+        MenuLang::Hant
+    } else {
+        MenuLang::Hans
+    }
+}
+
+/// First entry of `defaults read -g AppleLanguages`, which prints
+/// `(\n    "zh-Hant-TW",\n    "en-US"\n)`.
+fn first_preferred_language() -> Option<String> {
+    let out = Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output().ok()?;
+    first_language(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn first_language(list: &str) -> Option<String> {
+    list.split(|c: char| c == ',' || c == '\n' || c == '(' || c == ')')
+        .map(|s| s.trim().trim_matches('"').trim())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn main() {
@@ -1270,6 +1318,7 @@ fn main() {
             trash_paths,
             open_fda_settings,
             reveal_app,
+            show_log,
             full_disk_access,
             relaunch,
             quick_resize,

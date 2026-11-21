@@ -97,31 +97,31 @@ pub(crate) fn parse(q: &str) -> Parsed {
         if let Some((key, val)) = lower.split_once([':', '：']) {
             if !val.is_empty() {
                 match key {
-                    "kind" | "type" | "类型" | "is" => {
+                    "kind" | "type" | "类型" | "類型" | "is" => {
                         if let Some(k) = Kind::parse(val) {
                             p.kinds.push(k);
                             continue;
                         }
                     }
-                    "name" | "名" | "文件名" => {
+                    "name" | "名" | "文件名" | "檔名" | "檔案名稱" => {
                         let orig = tok.split_once([':', '：']).map(|x| x.1).unwrap_or(val).to_string();
                         p.name_terms.push(orig);
                         continue;
                     }
-                    "ext" | "后缀" => {
+                    "ext" | "后缀" | "後綴" | "副檔名" => {
                         p.exts.push(val.trim_start_matches('.').to_string());
                         continue;
                     }
-                    "in" | "folder" | "在" => {
+                    "in" | "folder" | "在" | "資料夾" => {
                         // keep original case for display, LIKE is case-insensitive anyway
                         p.folders.push(tok.split_once([':', '：']).map(|x| x.1).unwrap_or(val).to_string());
                         continue;
                     }
-                    "cloud" | "云盘" | "雲碟" | "云" | "雲" => {
+                    "cloud" | "云盘" | "雲碟" | "雲端" | "雲端硬碟" | "云" | "雲" => {
                         p.clouds.push(crate::config::provider_alias(val));
                         continue;
                     }
-                    "after" | "since" | "之后" => {
+                    "after" | "since" | "之后" | "之後" => {
                         if let Some(t) = parse_date(val, false) {
                             p.after = Some(t);
                             continue;
@@ -699,6 +699,30 @@ mod tests {
         let p = parse("cloud:Dropbox 云盘:百度网盘 cloud:GoogleDrive cloud:pCloud 报告");
         assert_eq!(p.clouds, vec!["dropbox", "baidu", "gdrive", "pcloud"]);
         assert_eq!(p.terms, vec!["报告".to_string()]);
+    }
+
+    #[test]
+    fn parses_traditional_chinese_filters() {
+        let p = parse("類型:影片 檔名:報告 副檔名:.mov 在:下載 之後:2024 之前:2025-06 雲端:Dropbox 旅行");
+        assert_eq!(p.kinds, vec![Kind::Video]);
+        assert_eq!(p.name_terms, vec!["報告".to_string()]);
+        assert_eq!(p.exts, vec!["mov".to_string()]);
+        assert_eq!(p.folders, vec!["下載".to_string()]);
+        assert_eq!(p.after, Some(days_from_civil(2024, 1, 1) * 86_400));
+        assert_eq!(p.before, Some(days_from_civil(2025, 7, 1) * 86_400));
+        assert_eq!(p.clouds, vec!["dropbox"]);
+        assert_eq!(p.terms, vec!["旅行".to_string()]);
+        let kinds = |q: &str| parse(q).kinds;
+        assert_eq!(kinds("類型:圖片"), vec![Kind::Image]);
+        assert_eq!(kinds("類型：文件"), vec![Kind::Document]);
+        assert_eq!(kinds("類型:簡報"), vec![Kind::Presentation]);
+        assert_eq!(kinds("類型:試算表"), vec![Kind::Spreadsheet]);
+        assert_eq!(kinds("類型:壓縮檔"), vec![Kind::Archive]);
+        assert_eq!(kinds("類型:音訊"), vec![Kind::Audio]);
+        assert_eq!(kinds("類型:電子書"), vec![Kind::Ebook]);
+        assert_eq!(kinds("類型:設計"), vec![Kind::Design]);
+        assert_eq!(parse("名:合約").name_terms, vec!["合約".to_string()]);
+        assert_eq!(parse("後綴:pdf").exts, vec!["pdf".to_string()]);
     }
 
     #[test]

@@ -35,6 +35,7 @@ function realBridge() {
     recentlyOpened: limit => invoke('recently_opened', { limit }),
     rebuildIndex: () => invoke('rebuild_index'),
     revealApp: () => invoke('reveal_app'),
+    showLog: () => invoke('show_log'),
     fullDiskAccess: () => invoke('full_disk_access'),
     relaunch: () => invoke('relaunch'),
     open: path => invoke('open_path', { path }),
@@ -202,7 +203,7 @@ function mockBridge() {
     snapshot: async () => ({
       status: { files: scanned ? files.length : 0, bytes: files.reduce((a, f) => a + f.size, 0), last_scan_at: now - 1800, last_scan_ms: 41200, generation: scanned ? 3 : 0 },
       config: { roots: [HOME], excluded_paths: [`${HOME}/Documents/虚拟机`], excluded_names: [], min_size: 1, include_hidden: false, ...opts },
-      scanning, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.8.0',
+      scanning, firstRun: !scanned, home: HOME, reading: false, fullDiskAccess: !location.hash.includes('nofda'), version: '0.9.0',
       semanticReady: true, semanticFiles: files.length,
       // #battery / #paused preview the background-work states (v0.8).
       hold: paused ? 'user' : location.hash.includes('battery') ? 'battery' : null,
@@ -272,7 +273,7 @@ function mockBridge() {
       return files.filter(f => ym(f.mtime) === month && (!kind || f.kind === kind)).sort((a, b) => b.mtime - a.mtime).slice(0, limit || 300)
     },
     saveShareCard: async () => '/Users/lin/Desktop/Lumen.png',
-    checkUpdate: async () => location.hash.includes('update') ? { version: '0.8.0', current: '0.6.1', notes: '' } : null,
+    checkUpdate: async () => location.hash.includes('update') ? { version: '0.9.1', current: '0.9.0', notes: '' } : null,
     installUpdate: async () => { for (let p = 0; p <= 1; p += 0.1) { emit('update-progress', p); await new Promise(r => setTimeout(r, 120)) } },
     quickResize: async () => {}, quickHide: async () => {}, showInMain: async () => {},
     // #link=ask:北海道 previews a lumen:// link arriving.
@@ -287,6 +288,7 @@ function mockBridge() {
     recentlyOpened: async n => files.slice(0, n || 20),
     rebuildIndex: async () => {},
     revealApp: async () => {},
+    showLog: async () => {},
     fullDiskAccess: async () => (fdaChecks = (fdaChecks || 0) + 1) > 3,
     relaunch: async () => location.reload(),
     open: async () => {}, reveal: async () => {}, quickLook: async () => {},

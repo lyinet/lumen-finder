@@ -134,6 +134,7 @@ function viewSearch(v) {
   v.append(h(`<div class="searchbar ${state.query ? 'has-q' : ''}">${state.semantic ? SPARK : ICON.search}
       <input id="q" spellcheck="false" autocomplete="off" placeholder="${esc(searchPh())}" value="${esc(state.query)}" />
       <span class="meta" id="meta"></span><button class="clear" id="clear">${ICON.x}</button>
+      ${state.semantic ? '' : `<button class="help" id="syntax" title="${esc(T.syntax_btn)}" aria-label="${esc(T.syntax_btn)}">?</button>`}
       ${semReady() ? `<button class="sem ${state.semantic ? 'on' : ''}" id="sem" title="⌘J">${SPARK}<span>${T.sem_btn}</span></button>` : ''}</div>`))
   const chips = h('<div class="chips" id="chips"></div>'); v.append(chips)
   v.append(h(`<div class="toolbar"><span id="count"></span><div class="seg" id="seg"><div class="seg-pill"></div>${
@@ -149,6 +150,7 @@ function viewSearch(v) {
   })
   $('#clear').onclick = () => { q.value = ''; state.query = ''; $('.searchbar').classList.remove('has-q'); runSearch(true); q.focus() }
   const sem = $('#sem'); if (sem) sem.onclick = () => toggleSemantic()
+  const sx = $('#syntax'); if (sx) sx.onclick = () => ($('#menu.syntax') ? closeMenu() : syntaxMenu(sx))
   $('#seg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; state.sort = b.dataset.s; moveSeg(); runSearch(true) })
   res.addEventListener('scroll', () => { if (state.more && res.scrollTop + res.clientHeight > res.scrollHeight - 300) loadMore() })
   bindRows(res)
@@ -237,7 +239,7 @@ function renderRows(from) {
   moveSel(false)
 }
 function emptyHTML() {
-  const tips = ['合同', T.tip_content, 'kind:pdf 发票', 'in:Downloads >100mb', 'after:2025 视频', 'nzzj']
+  const tips = T.tips
   return `<div class="empty"><div><div class="orb"></div><div class="big">${T.empty_title}</div><div>${T.empty_sub}</div>
     <div class="tips">${tips.map(t => `<button>${esc(t)}</button>`).join('')}</div></div></div>`
 }
@@ -597,6 +599,9 @@ async function viewSettings(v) {
   }
   form.append(h(`<div class="field"><h3>${T.set_privacy}</h3><p>${T.set_privacy_p}</p><button class="btn primary" id="set-rescan">${T.set_rescan}</button></div>`))
   $('#set-rescan').onclick = () => api.startScan().then(scanStarted)
+  const lg = h(`<div class="field"><h3>${T.set_log}</h3><p>${T.set_log_p}</p><button class="btn" id="set-log">${T.set_log_btn}</button></div>`)
+  form.append(lg)
+  $('#set-log', lg).onclick = () => api.showLog().catch(() => {})
   const rb = h(`<div class="field"><h3>${T.set_rebuild}</h3><p>${T.set_rebuild_p}</p><button class="btn danger" id="set-rebuild">${ICON.refresh || ''}${T.set_rebuild}</button></div>`)
   form.append(rb)
   armed($('#set-rebuild', rb), T.set_rebuild_confirm, async () => {
@@ -753,7 +758,23 @@ function menu(x, y, path) {
   m.onclick = e => { const b = e.target.closest('button'); if (b) { act(b.dataset.a, path); closeMenu() } }
   setTimeout(() => addEventListener('mousedown', closeMenuOutside), 0)
 }
-function closeMenuOutside(e) { if (!e.target.closest('#menu')) closeMenu() }
+/** The filter cheat-sheet under the search bar's ? button; a row adds its example to the query. */
+function syntaxMenu(btn) {
+  closeMenu()
+  const m = h(`<div class="menu syntax" id="menu"><div class="title">${esc(T.syntax_title)}</div>
+    ${T.syntax.map(([tok, d]) => `<button data-t="${esc(tok)}"><code>${esc(tok)}</code><span>${esc(d)}</span></button>`).join('')}
+    <div class="foot">${esc(T.syntax_foot)}</div></div>`)
+  document.body.append(m)
+  const b = btn.getBoundingClientRect(), r = m.getBoundingClientRect()
+  m.style.left = Math.max(8, Math.min(b.right - r.width, innerWidth - r.width - 8)) + 'px'; m.style.top = (b.bottom + 10) + 'px'
+  m.onclick = e => {
+    const x = e.target.closest('button'); if (!x) return
+    const q = $('#q'); q.value = (q.value.trim() ? q.value.trim() + ' ' : '') + x.dataset.t + ' '
+    closeMenu(); q.focus(); q.dispatchEvent(new Event('input'))
+  }
+  setTimeout(() => addEventListener('mousedown', closeMenuOutside), 0)
+}
+function closeMenuOutside(e) { if (!e.target.closest('#menu') && !e.target.closest('#syntax')) closeMenu() }
 function closeMenu() { $('#menu')?.remove(); removeEventListener('mousedown', closeMenuOutside) }
 
 /** A short note in the corner; with an action ({ label, run }) it stays longer and offers a fix. */
